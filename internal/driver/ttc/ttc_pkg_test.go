@@ -54,6 +54,7 @@ import (
 
 	"github.com/oracle/go-oracledb/v26/internal/driver/common"
 	oracleTest "github.com/oracle/go-oracledb/v26/internal/tests"
+	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
 
 func TestMain(m *testing.M) {
@@ -82,6 +83,17 @@ func InitConfig() error {
 	TestingConfig = oracleTest.TestingConfig
 	DefaultTestConfig = oracleTest.DefaultTestConfig
 	return nil
+}
+
+// requireErrorCode verifies that err or one of its wrapped errors implements
+// oracleErrors.SQLError with the expected stable error code.
+func requireErrorCode(t testing.TB, err error, want oracleErrors.ErrorCode) {
+	t.Helper()
+	var sqlErr oracleErrors.SQLError
+	ok := errors.As(err, &sqlErr)
+	if !ok || sqlErr.ErrorCode() != string(want) {
+		t.Fatalf("error = %T %v, want driver error code %s", err, err, want)
+	}
 }
 
 var testCases = []struct {
@@ -505,6 +517,13 @@ var testCases = []struct {
 	{"TestConnection_FaultyOnDrain", "unitary", false, TestConnection_FaultyOnDrain},
 	{"TestConnection_FaultyOnDrainInStatement", "unitary", false, TestConnection_FaultyOnDrainInStatement},
 	{"TestClobExecutor_WriteNCLOB", "unitary", false, TestClobExecutor_WriteNCLOB},
+	{"TestBlobExecutor_CreateTemporaryLob", "unitary", false, TestBlobExecutor_CreateTemporaryLob},
+	{"TestBlobExecutor_TemporaryOpenCloseIsOpen", "unitary", false, TestBlobExecutor_TemporaryOpenCloseIsOpen},
+	{"TestBlobExecutor_ReadRejectsAmountOutsideGoBufferRange", "unitary", false, TestBlobExecutor_ReadRejectsAmountOutsideGoBufferRange},
+	{"TestBlobExecutor_Write", "unitary", false, TestBlobExecutor_Write},
+	{"TestBlobExecutor_Read", "unitary", false, TestBlobExecutor_Read},
+	{"TestBlobExecutor_ReadRejectsOversizedServerResponse", "unitary", false, TestBlobExecutor_ReadRejectsOversizedServerResponse},
+	{"TestBlobExecutor_Errors", "unitary", false, TestBlobExecutor_Errors},
 
 	{"TestConnection_InvalidateOnOEROrSTA", "unitary", false, TestConnection_InvalidateOnOEROrSTA},
 	{"TestTransactionCommitSuccess", "unitary", false, TestTransactionCommitSuccess},
