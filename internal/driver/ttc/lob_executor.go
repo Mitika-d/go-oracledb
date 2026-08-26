@@ -78,8 +78,31 @@ func isCompletedLobResponseError(err error) bool {
 	return errors.As(err, &completed)
 }
 
-func (e *lobExecutor) operationError(_ context.Context, err error, stage string) error {
-	return common.NewOracleError(oracleErrors.LobExecError, err, stage)
+// operationError wraps a failed LOB transport stage. If the operation context
+// was canceled, it first performs break/reset and consumes the terminal TTIOER.
+// A successful recovery is marked as completed so callers may keep the
+// physical connection; failed recovery remains unmarked and requires discard.
+func (e *lobExecutor) operationError(ctx context.Context, err error, stage string) error {
+	wrapped := common.NewOracleError(oracleErrors.LobExecError, err, stage)
+	if ctx.Err() == nil {
+		return wrapped
+	}
+	streamer, ok := e.shelf.GetMessageStreamer().(MessageStreamerInterface)
+	if !ok {
+		return wrapped
+	}
+	terminal, restoreErr := restoreTTCStreamAfterCancellation(ctx, streamer)
+	if restoreErr != nil {
+		return common.NewOracleError(oracleErrors.LobExecError, errors.Join(err, restoreErr), stage)
+	}
+	if terminal != nil {
+		if oer, ok := terminal.(tTIOerIface); ok {
+			if serverErr := oer.getError(); serverErr != nil {
+				wrapped = common.NewOracleError(oracleErrors.LobExecError, errors.Join(ctx.Err(), serverErr), stage)
+			}
+		}
+	}
+	return &completedLobResponseError{err: wrapped}
 }
 
 // lobExecutor provides the base TTC RPC implementation that every LOB executor builds

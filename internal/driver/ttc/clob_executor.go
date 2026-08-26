@@ -47,6 +47,7 @@ import (
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
+	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
 
@@ -65,9 +66,8 @@ type lobCharacterSetPolicy struct {
 	ncharCS  driverCommon.UB2
 }
 
-const (
-	defaultCharacterLobChunkChars = 32 * 1024
-)
+// bytesPerUTF16CodeUnit is the number of bytes consumed by a UTF-16 code unit.
+const bytesPerUTF16CodeUnit = 2
 
 // lobCharacterUnits returns Oracle's logical unit count for CLOB and NCLOB
 // LOB operations. Oracle defines their offsets and amounts in UCS-2 units for
@@ -94,7 +94,7 @@ func lobCharacterUnits(runes []rune) int {
 //     limit. A supplementary code point can require four bytes in both TTC
 //     UTF-16 and returned UTF-8.
 func boundedClobReadAmount(requested driverCommon.UB8) driverCommon.UB8 {
-	maximum := driverCommon.UB8(defaultCharacterLobChunkChars)
+	maximum := driverCommon.UB8(internallob.DefaultCharacterLobChunkChars)
 	if maximum == 0 {
 		maximum = 1
 	}
