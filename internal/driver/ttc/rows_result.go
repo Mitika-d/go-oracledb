@@ -39,6 +39,7 @@
 package ttc
 
 import (
+	"bytes"
 	"context"
 	"database/sql/driver"
 	"io"
@@ -48,6 +49,7 @@ import (
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
+	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
 
@@ -175,6 +177,9 @@ type ttcRows struct {
 	// strictNullHandling controls whether SQL NULL is preserved or mapped to
 	// legacy type-specific zero values.
 	strictNullHandling bool
+	// streamLobResults selects locator-backed query values. The default keeps
+	// the established []byte/string scan contract.
+	streamLobResults bool
 }
 
 // SetShelf injects the shared TTC shelf instance used to resolve codecs and
@@ -183,8 +188,10 @@ type ttcRows struct {
 func (r *ttcRows) SetShelf(shelf *ttiShelf[driverCommon.MessageType]) {
 	r.shelf = shelf
 	r.strictNullHandling = true
-	if r.shelf.Shelf.GetConnectionProperties() != nil {
-		r.strictNullHandling = r.shelf.Shelf.GetConnectionProperties().IsStrictNullValueHandling()
+	r.streamLobResults = false
+	if properties := r.shelf.Shelf.GetConnectionProperties(); properties != nil {
+		r.strictNullHandling = properties.IsStrictNullValueHandling()
+		r.streamLobResults = properties.IsLobStreamingEnabled()
 	}
 }
 
@@ -322,7 +329,10 @@ func (r *ttcRows) decodeColumnValue(rawRow []driverCommon.B1Array, lobColumnCont
 			value.invalidate()
 			return nil, common.NewOracleError(oracleErrors.LobValueInvalidated, nil, "Rows decode")
 		}
-		return value, nil
+		if r.streamLobResults {
+			return value, nil
+		}
+		return materializeStreamedLob(value)
 	}
 	// Handle Oracle SQL NULL (typically raw length zero is NULL).
 	if len(data) == 0 {
@@ -342,6 +352,23 @@ func (r *ttcRows) decodeColumnValue(rawRow []driverCommon.B1Array, lobColumnCont
 	}
 
 	return val, nil
+}
+
+// materializeStreamedLob consumes a locator-backed query value for the default
+// database/sql []byte and string scan contracts.
+func materializeStreamedLob(value *streamedLob) (driver.Value, error) {
+	defer value.Close()
+	var output bytes.Buffer
+	if _, err := value.WriteTo(&output); err != nil {
+		return nil, err
+	}
+	if value.Kind() == internallob.BLOB {
+		if output.Len() == 0 {
+			return []byte{}, nil
+		}
+		return output.Bytes(), nil
+	}
+	return output.String(), nil
 }
 
 // registerLob records a newly decoded locator until it reaches EOF, is closed,
@@ -790,17 +817,22 @@ func (r *ttcRows) ColumnTypePrecisionScale(index int) (int64, int64, bool) {
 	return 0, 0, false
 }
 
-// ColumnTypeScanType implements RowsColumnTypeScanType. It returns the Go type
-// into which database values will be scanned. LOB columns use any because the
-// private TTC package returns an internal locator source for database/sql to
-// transfer to the public LOB API.
+// ColumnTypeScanType implements RowsColumnTypeScanType. Materialized LOB mode
+// reports the established []byte/string types; streaming mode reports any so a
+// sql.Scanner can accept the locator-backed source.
 func (r *ttcRows) ColumnTypeScanType(index int) reflect.Type {
 	dtype := r.columnContexts[index].DataType
-	if dtype == DtyBlob || dtype == DtyClob {
-		// database/sql cannot name the public lob.LOB type from this private
-		// transport package. any accurately describes the driver.Value source and
-		// lets sql.Scanner perform the ownership transfer.
-		return reflect.TypeFor[any]()
+	if dtype == DtyBlob {
+		if r.streamLobResults {
+			return reflect.TypeFor[any]()
+		}
+		return reflect.TypeFor[[]byte]()
+	}
+	if dtype == DtyClob {
+		if r.streamLobResults {
+			return reflect.TypeFor[any]()
+		}
+		return reflect.TypeFor[string]()
 	}
 	if r.columnContexts[index].ScanType == nil {
 		decoder, err := r.shelf.GetCodecFactory().getDecoder(dtype)
