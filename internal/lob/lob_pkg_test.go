@@ -36,31 +36,20 @@
 ** SOFTWARE.
  */
 
-package oracle
+package lob
 
-import internallob "github.com/oracle/go-oracledb/v26/internal/lob"
+import (
+	"testing"
 
-// BindBlob marks a byte slice for binding as an Oracle BLOB rather than a RAW
-// value. It supports payloads larger than Oracle's scalar RAW bind limit.
-//
-// BindBlob shares its backing storage with the supplied byte slice. Do not modify
-// the slice until the database/sql ExecContext or QueryContext call returns.
-// The driver streams BindBlob through a temporary BLOB locator and releases that
-// locator when execution is complete.
-type BindBlob = internallob.BindBlob
+	oracleTest "github.com/oracle/go-oracledb/v26/internal/tests"
+)
 
-// BindClob marks a string for binding as an Oracle CLOB rather than a VARCHAR
-// value. It supports payloads larger than Oracle's scalar character bind limit.
-//
-// BindClob must contain valid UTF-8. The driver streams it through a temporary CLOB
-// locator using the current validated database-character-set profile, then
-// releases that locator when execution is complete.
-type BindClob = internallob.BindClob
+var testCases = []oracleTest.CategorizedTestCase{
+	{Name: "TestInputValidationErrorRejectsInvalidKindAndSize", Categories: "unitary", Exclusive: false, Fn: TestInputValidationErrorRejectsInvalidKindAndSize},
+}
 
-// BindNClob marks a string for binding as an Oracle NCLOB rather than a VARCHAR
-// value. It supports payloads larger than Oracle's scalar character bind limit.
-//
-// BindNClob must contain valid UTF-8. The driver streams it through a temporary
-// NCLOB locator using the current validated national-character-set profile, then
-// releases that locator when execution is complete.
-type BindNClob = internallob.BindNClob
+// TestCategoryExecutor runs the internal LOB tests registered for the selected
+// repository test category.
+func TestCategoryExecutor(t *testing.T) {
+	oracleTest.RunCategoryExecutor(t, oracleTest.TestCategory, testCases)
+}

@@ -44,6 +44,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
@@ -72,6 +73,31 @@ type failIfReadReader struct {
 func (reader *failIfReadReader) Read([]byte) (int, error) {
 	reader.read = true
 	return 0, errors.New("reader must not be consumed")
+}
+
+// zeroProgressLobReader models a broken source that cannot make progress.
+type zeroProgressLobReader struct{}
+
+// Read reports no data and no error so the bind path must stop safely.
+func (*zeroProgressLobReader) Read([]byte) (int, error) { return 0, nil }
+
+// configureStreamInputFixture stages deterministic RPA/OER pairs for temporary
+// LOB creation, streaming, and optional zero-length trimming.
+func configureStreamInputFixture(streamer *fakeStreamer, amounts []driverCommon.UB8) {
+	streamer.events = nil
+	streamer.lobRpaAmounts = nil
+	for _, amount := range amounts {
+		streamer.events = append(streamer.events, newTTILobRPA(), &mockOer{})
+		streamer.lobRpaAmounts = append(streamer.lobRpaAmounts, amount)
+	}
+	streamer.onFlush = func() {
+		if streamer.definition.operation == kplobTmpCreate {
+			streamer.definition.sourceLocator.locatorBytes = append(
+				driverCommon.B1Array(nil),
+				newTestLobReferenceLocator(151).locatorBytes...,
+			)
+		}
+	}
 }
 
 // write records one simulated BLOB write.
@@ -158,6 +184,7 @@ func TestLobBindPipeline_NormalizeLobBindInputsConvertsMarkersToInputs(t *testin
 			args := []driver.NamedValue{
 				{Ordinal: 1, Value: testCase.value},
 				{Ordinal: 2, Value: int64(7)},
+				{Ordinal: 3, Value: testCase.value},
 			}
 
 			normalized := normalizeLobBindInputs(args)
@@ -176,6 +203,9 @@ func TestLobBindPipeline_NormalizeLobBindInputsConvertsMarkersToInputs(t *testin
 			}
 			if _, ok := normalized[1].Value.(int64); !ok {
 				t.Fatalf("non-LOB argument type = %T, want int64", normalized[1].Value)
+			}
+			if _, ok := normalized[2].Value.(internallob.Input); !ok {
+				t.Fatalf("later normalized LOB type = %T, want internallob.Input", normalized[2].Value)
 			}
 		})
 	}
@@ -365,6 +395,51 @@ func TestLobBindPipeline_StreamClobInputRejectsMalformedUTF8(t *testing.T) {
 	}
 }
 
+// TestLobBindPipeline_StreamClobInputHandlesBoundaries verifies empty input,
+// exact chunk flushing, short sources, and write failures.
+func TestLobBindPipeline_StreamClobInputHandlesBoundaries(t *testing.T) {
+	t.Parallel()
+
+	writeErr := errors.New("character write failed")
+	cases := []struct {
+		name       string
+		payload    []byte
+		size       int64
+		write      func(context.Context, *locator, bool, []rune) (driverCommon.UB8, error)
+		wantErr    error
+		wantChunks int
+	}{
+		// An empty declared source needs no server write.
+		{name: "empty input", size: 0, wantChunks: 0},
+		// A complete application-sized chunk is flushed before EOF is read.
+		{name: "full rune chunk", payload: []byte(strings.Repeat("a", internallob.DefaultCharacterLobChunkChars)), size: int64(internallob.DefaultCharacterLobChunkChars), wantChunks: 1},
+		// EOF before the declared byte count is an input error.
+		{name: "short source", payload: []byte("a"), size: 2, wantErr: io.ErrUnexpectedEOF},
+		// A write failure leaves the TTC stream boundary to the caller's policy.
+		{name: "write error", payload: []byte("a"), size: 1, write: func(context.Context, *locator, bool, []rune) (driverCommon.UB8, error) { return 0, writeErr }, wantErr: writeErr},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &recordingClobBindWriter{}
+			write := test.write
+			if write == nil {
+				write = writer.write
+			}
+			_, err := streamClobInput(context.Background(), write, writer.logicalAmount, newLocator(driverCommon.B1Array("locator"), 1), internallob.NewInput(bytes.NewReader(test.payload), internallob.CLOB, test.size), false)
+			if test.wantErr == nil {
+				if err != nil {
+					t.Fatalf("streamClobInput returned error: %v", err)
+				}
+			} else if !errors.Is(err, test.wantErr) {
+				t.Fatalf("streamClobInput error = %v, want %v", err, test.wantErr)
+			}
+			if len(writer.chunks) != test.wantChunks {
+				t.Fatalf("written chunks = %d, want %d", len(writer.chunks), test.wantChunks)
+			}
+		})
+	}
+}
+
 // TestLobBindPipeline_EncodeLobLocatorBindUsesLobOAC verifies locator binds
 // carry LOB-specific OAC metadata.
 func TestLobBindPipeline_EncodeLobLocatorBindUsesLobOAC(t *testing.T) {
@@ -382,6 +457,11 @@ func TestLobBindPipeline_EncodeLobLocatorBindUsesLobOAC(t *testing.T) {
 	oac := marshalled.(*tTIoac)
 	if string(encoded) != "locator" || DtyType(oac.dataType) != DtyClob || oac.characterSetForm != FormNChar || oac.characterSetID != al16Utf16CharSet {
 		t.Fatalf("encoded=%q oac=%+v, want NCLOB locator metadata", encoded, oac)
+	}
+	if _, _, err := encodeLobLocatorBind(lobLocatorBind{}); err == nil {
+		t.Fatal("encodeLobLocatorBind accepted an empty locator")
+	} else {
+		requireErrorCode(t, err, oracleErrors.InvalidLobInput)
 	}
 }
 
@@ -508,6 +588,342 @@ func TestLobBindPipeline_CanceledLobExchangeDiscardsStreamWhenRecoveryFails(t *t
 			if test.terminalErr != nil && pulls != 2 {
 				t.Fatalf("Pull count = %d, want canceled pull plus terminal pull", pulls)
 			}
+		})
+	}
+}
+
+// TestLobBindPipeline_PreparedLobBindsLifecycle verifies successful registration,
+// idempotent cleanup, invalid registration, and session abandonment.
+func TestLobBindPipeline_PreparedLobBindsLifecycle(t *testing.T) {
+	t.Parallel()
+
+	t.Run("add and free", func(t *testing.T) {
+		rows := newLobTestRows()
+		manager, _ := newTestStreamedLobManager(t, rows)
+		cleanup := &preparedLobBinds{manager: manager}
+		loc := newTestLobReferenceLocator(141)
+		if err := cleanup.add(loc); err != nil {
+			t.Fatalf("add returned error: %v", err)
+		}
+		if err := cleanup.free(); err != nil {
+			t.Fatalf("free returned error: %v", err)
+		}
+		if err := cleanup.free(); err != nil {
+			t.Fatalf("idempotent free returned error: %v", err)
+		}
+		if !cleanup.freed || loc.isTemporaryLocator() {
+			t.Fatalf("cleanup state = freed:%t temporary:%t, want freed and released", cleanup.freed, loc.isTemporaryLocator())
+		}
+	})
+
+	t.Run("invalid locator", func(t *testing.T) {
+		rows := newLobTestRows()
+		manager, _ := newTestStreamedLobManager(t, rows)
+		cleanup := &preparedLobBinds{manager: manager}
+		if err := cleanup.add(newLocator(nil, 1)); err == nil {
+			t.Fatal("add accepted an incomplete locator")
+		} else {
+			requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+		}
+		if len(cleanup.leases) != 0 {
+			t.Fatalf("leases after rejected add = %d, want 0", len(cleanup.leases))
+		}
+	})
+
+	t.Run("failed free abandons session", func(t *testing.T) {
+		rows := newLobTestRows()
+		manager, _ := newTestStreamedLobManager(t, rows)
+		cleanup := &preparedLobBinds{
+			manager: manager,
+			// A lease owned by another registry models a cleanup ownership failure.
+			leases: []*lobReferenceLease{{registry: newLobReferenceRegistry()}},
+		}
+		if err := cleanup.free(); err == nil {
+			t.Fatal("free unexpectedly succeeded with a mismatched lease")
+		} else {
+			requireErrorCode(t, err, oracleErrors.InternalError)
+		}
+		if !rows.shelf.lobState.isInvalidated() {
+			t.Fatal("failed free did not abandon the LOB session")
+		}
+	})
+
+	t.Run("nil and empty cleanup", func(t *testing.T) {
+		var nilCleanup *preparedLobBinds
+		if err := nilCleanup.free(); err != nil {
+			t.Fatalf("nil free returned error: %v", err)
+		}
+		nilCleanup.abandon()
+
+		rows := newLobTestRows()
+		manager, _ := newTestStreamedLobManager(t, rows)
+		empty := &preparedLobBinds{manager: manager}
+		if err := empty.free(); err != nil {
+			t.Fatalf("empty free returned error: %v", err)
+		}
+		empty.abandon()
+		if !rows.shelf.lobState.isInvalidated() {
+			t.Fatal("empty abandon did not invalidate the LOB session")
+		}
+	})
+}
+
+// TestLobBindPipeline_CleanupDispositionClassifiesRPCResults verifies that
+// only a completed terminal response permits immediate temporary-LOB cleanup.
+func TestLobBindPipeline_CleanupDispositionClassifiesRPCResults(t *testing.T) {
+	t.Parallel()
+
+	completed := &completedLobResponseError{err: errors.New("terminal response consumed")}
+	for _, test := range []struct {
+		name string
+		err  error
+		want lobCleanupDisposition
+	}{
+		{name: "completed response", err: completed, want: lobCleanupFreeNow},
+		{name: "transport error", err: errors.New("stream boundary unknown"), want: lobCleanupAbandon},
+		{name: "nil error", want: lobCleanupAbandon},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			// A nil or ordinary error carries no proof that the TTC response was consumed.
+			if got := lobCleanupAfterRPC(test.err); got != test.want {
+				t.Fatalf("cleanup disposition = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// TestLobBindPipeline_PrepareAndRunHelpers verifies no-input preparation,
+// cancellation-aware RPC wrapping, and creation failure classification.
+func TestLobBindPipeline_PrepareAndRunHelpers(t *testing.T) {
+	t.Parallel()
+
+	rows := newLobTestRows()
+	args := []driver.NamedValue{{Ordinal: 1, Value: int64(7)}}
+	prepared, cleanup, err := prepareStreamedLobBinds(context.Background(), rows.shelf, newTestSessionContext(), args, -1)
+	if err != nil || cleanup != nil || &prepared[0] != &args[0] {
+		t.Fatalf("no-input preparation = (%v, %v, %v), want original args and no cleanup", prepared, cleanup, err)
+	}
+	if _, _, err := prepareStreamedLobBinds(context.Background(), nil, newTestSessionContext(), args, 0); err == nil {
+		t.Fatal("preparation accepted a missing TTC session")
+	} else {
+		requireErrorCode(t, err, oracleErrors.InvalidLobInput)
+	}
+
+	for _, test := range []struct {
+		name string
+		want error
+	}{
+		{name: "success", want: nil},
+		{name: "callback error", want: errors.New("callback failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := runCancelableLobRPC[string](context.Background(), rows.shelf, func(context.Context) (string, error) {
+				return "result", test.want
+			})
+			if got != "result" || !errors.Is(err, test.want) {
+				t.Fatalf("runCancelableLobRPC = (%q, %v), want (result, %v)", got, err, test.want)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		kind internallob.Kind
+	}{
+		{name: "BLOB", kind: internallob.BLOB},
+		{name: "CLOB", kind: internallob.CLOB},
+		{name: "NCLOB", kind: internallob.NCLOB},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			localRows := newLobTestRows()
+			localManager, streamer := newTestStreamedLobManager(t, localRows)
+			streamer.pushErr = errors.New("create push failed")
+			input := internallob.NewInput(bytes.NewReader([]byte("x")), test.kind, 1)
+			_, loc, disposition, err := localManager.streamInput(context.Background(), input)
+			if err == nil || loc != nil || disposition != lobCleanupAbandon {
+				t.Fatalf("streamInput result = (loc:%v, disposition:%v, err:%v), want creation failure with abandon", loc, disposition, err)
+			}
+			requireErrorCode(t, err, oracleErrors.LobExecError)
+		})
+	}
+
+	// An ordinary argument is skipped before the canceled streamed input is prepared.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	localRows := newLobTestRows()
+	localManager, streamer := newTestStreamedLobManager(t, localRows)
+	streamer.pushErr = errors.New("prepare push failed")
+	args = []driver.NamedValue{
+		{Ordinal: 1, Value: int64(7)},
+		{Ordinal: 2, Value: internallob.NewInput(bytes.NewReader([]byte("x")), internallob.BLOB, 1)},
+	}
+	if _, _, err := localManager.prepareBinds(ctx, args, 0); err == nil {
+		t.Fatal("prepareBinds unexpectedly succeeded after streamed creation failure")
+	}
+	if !localRows.shelf.lobState.isInvalidated() {
+		t.Fatal("prepareBinds failure did not abandon the LOB session")
+	}
+
+	for _, test := range []struct {
+		name       string
+		kind       internallob.Kind
+		payload    []byte
+		amounts    []driverCommon.UB8
+		wantOffset driverCommon.UB8
+	}{
+		// Non-empty BLOB input exercises create followed by a binary write.
+		{name: "BLOB data", kind: internallob.BLOB, payload: []byte("x"), amounts: []driverCommon.UB8{0, 1}, wantOffset: 2},
+		// Non-empty CLOB input exercises UTF-8 decoding and a character write.
+		{name: "CLOB data", kind: internallob.CLOB, payload: []byte("x"), amounts: []driverCommon.UB8{0, 1}, wantOffset: 2},
+		// Non-empty NCLOB input uses the national-character bind metadata.
+		{name: "NCLOB data", kind: internallob.NCLOB, payload: []byte("x"), amounts: []driverCommon.UB8{0, 1}, wantOffset: 2},
+		// Empty BLOB input is made non-NULL by a zero-length trim.
+		{name: "empty BLOB", kind: internallob.BLOB, amounts: []driverCommon.UB8{0, 0, 0}, wantOffset: 1},
+		// Empty CLOB input follows the same non-NULL preservation rule.
+		{name: "empty CLOB", kind: internallob.CLOB, amounts: []driverCommon.UB8{0, 0, 0}, wantOffset: 1},
+		// Empty NCLOB input also uses a zero-length trim in UTF-16 units.
+		{name: "empty NCLOB", kind: internallob.NCLOB, amounts: []driverCommon.UB8{0, 0, 0}, wantOffset: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rows := newLobTestRows()
+			manager, streamer := newTestStreamedLobManager(t, rows)
+			configureStreamInputFixture(streamer, test.amounts)
+			input := internallob.NewInput(bytes.NewReader(test.payload), test.kind, int64(len(test.payload)))
+			bind, loc, disposition, err := manager.streamInput(context.Background(), input)
+			if err != nil || loc == nil || disposition != lobCleanupFreeNow {
+				t.Fatalf("streamInput result = (bind:%+v, loc:%v, disposition:%v, err:%v), want success", bind, loc, disposition, err)
+			}
+			if bind.kind != test.kind || loc.offset != test.wantOffset || !bytes.Equal(bind.locator, loc.locatorBytes) {
+				t.Fatalf("streamInput metadata = (kind:%v, offset:%d, locator:% X), want (kind:%v, offset:%d, matching locator)", bind.kind, loc.offset, bind.locator, test.kind, test.wantOffset)
+			}
+		})
+	}
+
+	// Invalid kinds are rejected before any temporary LOB is created.
+	invalidRows := newLobTestRows()
+	invalidManager, _ := newTestStreamedLobManager(t, invalidRows)
+	_, loc, disposition, err := invalidManager.streamInput(context.Background(), internallob.NewInput(bytes.NewReader([]byte("x")), internallob.Kind(99), 1))
+	if err == nil || loc != nil || disposition != lobCleanupFreeNow {
+		t.Fatalf("invalid-kind streamInput result = (loc:%v, disposition:%v, err:%v), want InvalidLobInput", loc, disposition, err)
+	}
+	requireErrorCode(t, err, oracleErrors.InvalidLobInput)
+
+	// A successful prepare replaces only streamed values and returns their cleanup owner.
+	preparedRows := newLobTestRows()
+	_, preparedStreamer := newTestStreamedLobManager(t, preparedRows)
+	configureStreamInputFixture(preparedStreamer, []driverCommon.UB8{0, 1})
+	args = []driver.NamedValue{
+		{Ordinal: 1, Value: int64(7)},
+		{Ordinal: 2, Value: internallob.NewInput(bytes.NewReader([]byte("x")), internallob.BLOB, 1)},
+	}
+	prepared, preparedCleanup, err := prepareStreamedLobBinds(context.Background(), preparedRows.shelf, newTestSessionContext(), args, 1)
+	if err != nil || preparedCleanup == nil {
+		t.Fatalf("successful preparation = (%v, %v), want prepared args and cleanup", prepared, err)
+	}
+	if _, ok := prepared[1].Value.(lobLocatorBind); !ok {
+		t.Fatalf("prepared streamed value = %T, want lobLocatorBind", prepared[1].Value)
+	}
+	if err := preparedCleanup.free(); err != nil {
+		t.Fatalf("successful preparation cleanup returned error: %v", err)
+	}
+}
+
+// TestLobBindPipeline_StreamBlobInputRejectsSourceFailures verifies source
+// cancellation, read errors, and no-progress readers are rejected safely.
+func TestLobBindPipeline_StreamBlobInputRejectsSourceFailures(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		ctx    func() context.Context
+		reader io.Reader
+	}{
+		{
+			name: "canceled context",
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			reader: bytes.NewReader([]byte("x")),
+		},
+		{name: "source read error", ctx: context.Background, reader: &failIfReadReader{}},
+		{name: "no progress", ctx: context.Background, reader: &zeroProgressLobReader{}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := streamBlobInput(test.ctx(), func(context.Context, *locator, driverCommon.B1Array) (driverCommon.UB8, error) {
+				t.Fatal("source failure reached the write callback")
+				return 0, nil
+			}, newLocator(driverCommon.B1Array("locator"), 1), internallob.NewInput(test.reader, internallob.BLOB, 1))
+			if err == nil {
+				t.Fatal("streamBlobInput unexpectedly succeeded")
+			}
+			requireErrorCode(t, err, oracleErrors.InvalidLobInput)
+		})
+	}
+
+}
+
+// TestLobBindPipeline_StreamClobInputRejectsSourceAndAcknowledgementFailures
+// verifies character conversion, source, translation, and write failures.
+func TestLobBindPipeline_StreamClobInputRejectsSourceAndAcknowledgementFailures(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name          string
+		ctx           func() context.Context
+		reader        io.Reader
+		logicalAmount func([]rune) (driverCommon.UB8, error)
+		write         func(context.Context, *locator, bool, []rune) (driverCommon.UB8, error)
+	}{
+		{
+			name: "canceled context",
+			ctx: func() context.Context {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx
+			},
+			reader: bytes.NewReader([]byte("x")),
+		},
+		{name: "source read error", ctx: context.Background, reader: &failIfReadReader{}},
+		{
+			name:   "logical amount error",
+			ctx:    context.Background,
+			reader: bytes.NewReader([]byte("x")),
+			logicalAmount: func([]rune) (driverCommon.UB8, error) {
+				return 0, errors.New("cannot calculate logical amount")
+			},
+		},
+		{
+			name:   "short acknowledgement",
+			ctx:    context.Background,
+			reader: bytes.NewReader([]byte("x")),
+			write: func(context.Context, *locator, bool, []rune) (driverCommon.UB8, error) {
+				return 0, nil
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			logicalAmount := test.logicalAmount
+			if logicalAmount == nil {
+				logicalAmount = func(runes []rune) (driverCommon.UB8, error) {
+					return driverCommon.UB8(lobCharacterUnits(runes)), nil
+				}
+			}
+			write := test.write
+			if write == nil {
+				write = func(context.Context, *locator, bool, []rune) (driverCommon.UB8, error) {
+					t.Fatal("source failure reached the write callback")
+					return 0, nil
+				}
+			}
+			_, err := streamClobInput(test.ctx(), write, logicalAmount, newLocator(driverCommon.B1Array("locator"), 1), internallob.NewInput(test.reader, internallob.CLOB, 1), false)
+			if err == nil {
+				t.Fatal("streamClobInput unexpectedly succeeded")
+			}
+			requireErrorCode(t, err, oracleErrors.InvalidLobInput)
 		})
 	}
 }

@@ -96,18 +96,39 @@ func TestLobManager_OwnsTemporaryLease(t *testing.T) {
 	}
 }
 
-// TestLobManager_RejectsUnsupportedKind verifies the shared dispatch boundary
-// rejects unsupported kinds before it reaches a type-specific executor.
+// TestLobManager_RejectsUnsupportedKind verifies every manager dispatch method
+// rejects an unsupported kind before it reaches a type-specific executor.
 func TestLobManager_RejectsUnsupportedKind(t *testing.T) {
 	t.Parallel()
 	manager, err := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
 	if err != nil {
 		t.Fatalf("newLobManager: %v", err)
 	}
-	_, err = manager.createTemporary(context.Background(), internallob.Kind(99))
-	var coded oracleErrors.SQLError
-	if err == nil || !errors.As(err, &coded) || coded.ErrorCode() != string(oracleErrors.InvalidLobSource) {
-		t.Fatalf("createTemporary unsupported kind error = %v, want %s", err, oracleErrors.InvalidLobSource)
+	ctx := context.Background()
+	unsupported := internallob.Kind(99)
+	loc := (*locator)(nil)
+	cases := []struct {
+		name string
+		call func() error
+	}{
+		{name: "createTemporary", call: func() error { _, err := manager.createTemporary(ctx, unsupported); return err }},
+		{name: "read", call: func() error { _, _, err := manager.read(ctx, unsupported, loc, 1); return err }},
+		{name: "write", call: func() error { _, err := manager.write(ctx, unsupported, loc, nil); return err }},
+		{name: "length", call: func() error { _, err := manager.length(ctx, unsupported, loc); return err }},
+		{name: "chunkSize", call: func() error { _, err := manager.chunkSize(ctx, unsupported, loc); return err }},
+		{name: "trim", call: func() error { _, err := manager.trim(ctx, unsupported, loc, 1); return err }},
+		{name: "open", call: func() error { _, err := manager.open(ctx, unsupported, loc, lobOpenModeReadOnly); return err }},
+		{name: "close", call: func() error { return manager.close(ctx, unsupported, loc) }},
+		{name: "isOpen", call: func() error { _, err := manager.isOpen(ctx, unsupported, loc); return err }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var coded oracleErrors.SQLError
+			err := tc.call()
+			if err == nil || !errors.As(err, &coded) || coded.ErrorCode() != string(oracleErrors.InvalidLobSource) {
+				t.Fatalf("unsupported kind error = %v, want %s", err, oracleErrors.InvalidLobSource)
+			}
+		})
 	}
 }
 
@@ -227,6 +248,170 @@ func TestLobManager_SharedExecutorExchangesAreAdmissionSerialized(t *testing.T) 
 	}
 	if err := <-secondDone; err != nil {
 		t.Fatalf("second LOB exchange: %v", err)
+	}
+}
+
+// newLobManagerRPCFixture creates a manager backed by the deterministic LOB
+// message factory and fake streamer used by executor tests. Each operation gets
+// a fresh fixture because the fake streamer consumes its response messages.
+func newLobManagerRPCFixture(t *testing.T) (*lobManager, *fakeStreamer) {
+	t.Helper()
+	ttcShelf := newShelf[common.MessageType]()
+	fixtureShelf, _, _ := newLobTestShelf(8192)
+	ttcShelf.RegisterMessageFactory(fixtureShelf.GetMessageFactory())
+	factory := ttcShelf.GetMessageFactory().(Factory)
+	rpa, err := factory.GetMessageForFunction(TTIRPA, oLobOps)
+	if err != nil {
+		t.Fatalf("GetMessageForFunction: %v", err)
+	}
+	streamer := &fakeStreamer{
+		events:    []common.Message[common.MessageType]{rpa, &mockOer{}},
+		preHooks:  make(map[common.MessageType]StreamerPreUnmarshallCallback),
+		postHooks: make(map[common.MessageType]StreamerPostUnmarshallCallback),
+		// A zero response is valid for every dispatcher operation and avoids
+		// claiming bytes that the one-byte read fixture did not return.
+		lobRpaAmounts: []common.UB8{0},
+	}
+	ttcShelf.RegisterMessageStreamer(streamer)
+	manager, err := newLobManager(ttcShelf, newTestSessionContext())
+	if err != nil {
+		t.Fatalf("newLobManager: %v", err)
+	}
+	return manager, streamer
+}
+
+// TestLobManager_DispatchesAllLOBOperations verifies that every supported LOB
+// kind reaches the correct manager operation and type-specific executor.
+func TestLobManager_DispatchesAllLOBOperations(t *testing.T) {
+	t.Parallel()
+	type operationCase struct {
+		name string
+		want lobOperationCode
+		call func(context.Context, *lobManager, internallob.Kind, *locator) error
+	}
+	kinds := []struct {
+		name string
+		kind internallob.Kind
+	}{
+		{name: "BLOB", kind: internallob.BLOB},
+		{name: "CLOB", kind: internallob.CLOB},
+		{name: "NCLOB", kind: internallob.NCLOB},
+	}
+	operations := []operationCase{
+		{name: "createTemporary", want: kplobTmpCreate, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, _ *locator) error {
+			_, err := manager.createTemporary(ctx, kind)
+			return err
+		}},
+		{name: "read", want: kplobRead, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			_, _, err := manager.read(ctx, kind, loc, 1)
+			return err
+		}},
+		{name: "write", want: kplobWrite, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			_, err := manager.write(ctx, kind, loc, []byte("A"))
+			return err
+		}},
+		{name: "length", want: kplobGetLength, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			_, err := manager.length(ctx, kind, loc)
+			return err
+		}},
+		{name: "chunkSize", want: kplobPageSize, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			_, err := manager.chunkSize(ctx, kind, loc)
+			return err
+		}},
+		{name: "trim", want: kplobTrim, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			_, err := manager.trim(ctx, kind, loc, 1)
+			return err
+		}},
+		{name: "open", want: kplobOpen, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			_, err := manager.open(ctx, kind, loc, lobOpenModeReadWrite)
+			return err
+		}},
+		{name: "close", want: kplobClose, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			return manager.close(ctx, kind, loc)
+		}},
+		{name: "isOpen", want: kplobIsOpen, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
+			_, err := manager.isOpen(ctx, kind, loc)
+			return err
+		}},
+	}
+
+	for _, operation := range operations {
+		operation := operation
+		t.Run(operation.name, func(t *testing.T) {
+			for _, lobKind := range kinds {
+				lobKind := lobKind
+				t.Run(lobKind.name, func(t *testing.T) {
+					manager, streamer := newLobManagerRPCFixture(t)
+					loc := newLocator(newTestLocator(false), 1)
+					if err := operation.call(context.Background(), manager, lobKind.kind, loc); err != nil {
+						t.Fatalf("%s %s: %v", lobKind.name, operation.name, err)
+					}
+					if streamer.definition == nil {
+						t.Fatalf("%s %s did not push a LOB definition", lobKind.name, operation.name)
+					}
+					if got := streamer.definition.operation; got != operation.want {
+						t.Fatalf("%s %s operation = %v, want %v", lobKind.name, operation.name, got, operation.want)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestLobManager_HandlesSessionAbandonmentAndLeaseErrors verifies nil-safe
+// teardown, cross-session lease rejection, standalone free, and stale events.
+func TestLobManager_HandlesSessionAbandonmentAndLeaseErrors(t *testing.T) {
+	t.Parallel()
+	// Teardown can be called from partially initialized failure paths.
+	abandonLobSession(nil)
+	discardLobSessionState(nil)
+	partial := &ttiShelf[common.MessageType]{}
+	abandonLobSession(partial)
+	discardLobSessionState(partial)
+	stateWithoutRegistry := newShelf[common.MessageType]()
+	stateWithoutRegistry.lobState = &lobSessionState{}
+	discardLobSessionState(stateWithoutRegistry)
+
+	firstShelf := newShelf[common.MessageType]()
+	firstManager, err := newLobManager(firstShelf, newTestSessionContext())
+	if err != nil {
+		t.Fatalf("newLobManager first: %v", err)
+	}
+	secondManager, err := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
+	if err != nil {
+		t.Fatalf("newLobManager second: %v", err)
+	}
+	lease, err := secondManager.retainLobReference(newTestLobReferenceLocator(72))
+	if err != nil {
+		t.Fatalf("retain second-session lease: %v", err)
+	}
+	if err := firstManager.releaseLobReference(nil); err != nil {
+		t.Fatalf("release nil lease: %v", err)
+	}
+	if err := firstManager.releaseLobReference(lease); err == nil {
+		t.Fatal("cross-session lease release succeeded")
+	}
+	if err := secondManager.releaseLobReference(lease); err != nil {
+		t.Fatalf("release owning-session lease: %v", err)
+	}
+	if err := firstManager.freeLobReference(nil); err == nil {
+		t.Fatal("free nil locator succeeded")
+	}
+	if err := firstManager.freeLobReference(newTestLobReferenceLocator(73)); err != nil {
+		t.Fatalf("free standalone locator: %v", err)
+	}
+
+	recorder := &lobRegistryEventRecorder{}
+	firstShelf.getEventService().register(recorder, streamerStaleEvent)
+	abandonLobSession(firstShelf)
+	if !firstShelf.lobState.isInvalidated() {
+		t.Fatal("abandoned LOB session was not invalidated")
+	}
+	if got := lobReferenceEntryCount(firstShelf); got != 0 {
+		t.Fatalf("entries after abandonment = %d, want 0", got)
+	}
+	if len(recorder.events) != 1 || recorder.events[0] != streamerStaleEvent {
+		t.Fatalf("events = %v, want [streamerStaleEvent]", recorder.events)
 	}
 }
 

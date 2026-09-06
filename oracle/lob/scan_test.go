@@ -42,19 +42,24 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"testing"
 
 	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
+	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
 
 type scanTestSource struct {
-	kind       Kind
-	data       []byte
-	offset     int
-	closed     bool
-	readErr    error
-	closeErr   error
-	noProgress bool
+	kind            Kind
+	data            []byte
+	offset          int
+	closed          bool
+	readErr         error
+	sizeErr         error
+	reportedSize    int64
+	useReportedSize bool
+	closeErr        error
+	noProgress      bool
 }
 
 func (source *scanTestSource) Read(dst []byte) (int, error) {
@@ -78,8 +83,16 @@ func (source *scanTestSource) WriteTo(writer io.Writer) (int64, error) {
 	return int64(n), err
 }
 
-func (source *scanTestSource) Close() error              { source.closed = true; return source.closeErr }
-func (source *scanTestSource) Size() (int64, error)      { return int64(len(source.data)), nil }
+func (source *scanTestSource) Close() error { source.closed = true; return source.closeErr }
+func (source *scanTestSource) Size() (int64, error) {
+	if source.sizeErr != nil {
+		return 0, source.sizeErr
+	}
+	if source.useReportedSize {
+		return source.reportedSize, nil
+	}
+	return int64(len(source.data)), nil
+}
 func (source *scanTestSource) ChunkSize() (int64, error) { return 1, nil }
 func (source *scanTestSource) Kind() internallob.Kind    { return source.kind }
 
@@ -137,6 +150,103 @@ func TestLOBScan_RejectsNullAndWrongKind(t *testing.T) {
 	var text Text
 	if err := text.Scan(&scanTestSource{kind: BLOB, data: []byte("data")}); err == nil {
 		t.Fatal("Text.Scan(BLOB) succeeded")
+	}
+}
+
+// TestLOBScan_RejectsTypedNilSource verifies Scan rejects a typed-nil LOB
+// source before attempting to dereference it.
+func TestLOBScan_RejectsTypedNilSource(t *testing.T) {
+	// A typed nil pointer stored in an interface is not equal to a nil
+	// interface, so Scan must explicitly reject it before using the source.
+	var source *scanTestSource
+	var value Bytes
+	if err := value.Scan(source); err == nil {
+		t.Fatal("Bytes.Scan(typed nil source) succeeded")
+	}
+}
+
+// TestLOBScan_ScanPropagatesReadErrors verifies the public scan destinations
+// propagate source read failures and still close the source.
+func TestLOBScan_ScanPropagatesReadErrors(t *testing.T) {
+	readErr := errors.New("read failed")
+	tests := []struct {
+		name   string
+		source *scanTestSource
+	}{
+		// BLOB scans must return the source read error and close the source.
+		{
+			name:   "BLOB",
+			source: &scanTestSource{kind: BLOB, readErr: readErr},
+		},
+		// CLOB scans must provide the same error and close behavior.
+		{
+			name:   "CLOB",
+			source: &scanTestSource{kind: CLOB, readErr: readErr},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var err error
+			switch test.source.kind {
+			case BLOB:
+				var value Bytes
+				err = value.Scan(test.source)
+			case CLOB:
+				var value Text
+				err = value.Scan(test.source)
+			}
+			if !errors.Is(err, readErr) {
+				t.Fatalf("Scan error = %v, want %v", err, readErr)
+			}
+			if !test.source.closed {
+				t.Fatal("Scan did not close source")
+			}
+		})
+	}
+}
+
+// TestLOBScan_ReadAllSizeErrors verifies _readAll propagates BLOB size lookup
+// failures and rejects sizes larger than the supported MaxInt32 limit.
+func TestLOBScan_ReadAllSizeErrors(t *testing.T) {
+	sizeErr := errors.New("size failed")
+	tests := []struct {
+		name     string
+		source   *scanTestSource
+		wantErr  error
+		wantCode oracleErrors.ErrorCode
+	}{
+		// A failure while obtaining the source size must be returned unchanged.
+		{
+			name:    "size failure",
+			source:  &scanTestSource{kind: BLOB, sizeErr: sizeErr},
+			wantErr: sizeErr,
+		},
+		// An oversized source must be rejected before reading its contents.
+		{
+			name: "size exceeds MaxInt32",
+			source: &scanTestSource{
+				kind:            BLOB,
+				reportedSize:    int64(math.MaxInt32) + 1,
+				useReportedSize: true,
+			},
+			wantCode: oracleErrors.InvalidLOBBuffer,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := _readAll(test.source)
+			if test.wantErr != nil && !errors.Is(err, test.wantErr) {
+				t.Fatalf("error = %v, want %v", err, test.wantErr)
+			}
+			if test.wantCode != "" {
+				requireLOBTestErrorCode(t, err, test.wantCode)
+			}
+			if !test.source.closed {
+				t.Fatal("_readAll did not close source")
+			}
+		})
 	}
 }
 

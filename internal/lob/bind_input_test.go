@@ -36,31 +36,55 @@
 ** SOFTWARE.
  */
 
-package oracle
+package lob
 
-import internallob "github.com/oracle/go-oracledb/v26/internal/lob"
+import (
+	"errors"
+	"strings"
+	"testing"
 
-// BindBlob marks a byte slice for binding as an Oracle BLOB rather than a RAW
-// value. It supports payloads larger than Oracle's scalar RAW bind limit.
-//
-// BindBlob shares its backing storage with the supplied byte slice. Do not modify
-// the slice until the database/sql ExecContext or QueryContext call returns.
-// The driver streams BindBlob through a temporary BLOB locator and releases that
-// locator when execution is complete.
-type BindBlob = internallob.BindBlob
+	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
+)
 
-// BindClob marks a string for binding as an Oracle CLOB rather than a VARCHAR
-// value. It supports payloads larger than Oracle's scalar character bind limit.
-//
-// BindClob must contain valid UTF-8. The driver streams it through a temporary CLOB
-// locator using the current validated database-character-set profile, then
-// releases that locator when execution is complete.
-type BindClob = internallob.BindClob
+// TestInputValidationErrorRejectsInvalidKindAndSize verifies that invalid LOB
+// kinds and negative size markers return InvalidLobInput errors.
+func TestInputValidationErrorRejectsInvalidKindAndSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       Input
+		wantMessage string
+	}{
+		{
+			// A non-nil reader with an unsupported kind must be rejected.
+			name:        "invalid kind",
+			input:       NewInput(strings.NewReader("payload"), Unknown, 7),
+			wantMessage: "LOB kind",
+		},
+		{
+			// A non-negative kind with a negative size marker must be rejected.
+			name:        "negative size",
+			input:       NewInput(strings.NewReader("payload"), BLOB, -1),
+			wantMessage: "size marker",
+		},
+	}
 
-// BindNClob marks a string for binding as an Oracle NCLOB rather than a VARCHAR
-// value. It supports payloads larger than Oracle's scalar character bind limit.
-//
-// BindNClob must contain valid UTF-8. The driver streams it through a temporary
-// NCLOB locator using the current validated national-character-set profile, then
-// releases that locator when execution is complete.
-type BindNClob = internallob.BindNClob
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.input.ValidationError()
+			if err == nil {
+				t.Fatal("ValidationError() returned nil")
+			}
+
+			var sqlErr oracleErrors.SQLError
+			if !errors.As(err, &sqlErr) {
+				t.Fatalf("error = %T, want oracle SQL error", err)
+			}
+			if got, want := sqlErr.ErrorCode(), string(oracleErrors.InvalidLobInput); got != want {
+				t.Errorf("error code = %q, want %q", got, want)
+			}
+			if !strings.Contains(err.Error(), tc.wantMessage) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantMessage)
+			}
+		})
+	}
+}

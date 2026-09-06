@@ -39,6 +39,7 @@
 package lob
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"database/sql/driver"
@@ -370,12 +371,15 @@ type directLOBPromotionSource struct {
 	testSource
 	detachStarted chan struct{}
 	allowDetach   chan struct{}
+	detachErr     error
 }
 
 func (source *directLOBPromotionSource) DetachPersistentLocator(any) ([]byte, error) {
-	close(source.detachStarted)
-	<-source.allowDetach
-	return []byte("promoted-locator"), nil
+	if source.detachStarted != nil {
+		close(source.detachStarted)
+		<-source.allowDetach
+	}
+	return []byte("promoted-locator"), source.detachErr
 }
 
 type directLOBTestConnector struct {
@@ -398,7 +402,7 @@ func (driver directLOBTestDriver) Open(string) (driver.Conn, error) {
 	return driver.raw, nil
 }
 
-func newDirectLOBTestConn(t *testing.T, raw *directLOBTestRawConn) *sql.Conn {
+func newDirectLOBTestConn(t *testing.T, raw driver.Conn) *sql.Conn {
 	t.Helper()
 	db := sql.OpenDB(directLOBTestConnector{raw: raw})
 	t.Cleanup(func() { _ = db.Close() })
@@ -414,11 +418,17 @@ func newDirectLOBTestConn(t *testing.T, raw *directLOBTestRawConn) *sql.Conn {
 // overrides the raw operation it exercises.
 type directLOBTestRawConn struct {
 	directLOBDriver
-	sessionKey any
-	readFn     func(context.Context, uint8, []byte, uint64, uint64) ([]byte, uint64, error)
-	trimFn     func(context.Context, uint8, []byte, uint64) (uint64, error)
-	openFn     func(context.Context, uint8, []byte, uint8) (bool, []byte, error)
-	closeFn    func(context.Context, uint8, []byte) ([]byte, error)
+	sessionKey  any
+	createFn    func(context.Context, uint8) ([]byte, error)
+	readFn      func(context.Context, uint8, []byte, uint64, uint64) ([]byte, uint64, error)
+	writeFn     func(context.Context, uint8, []byte, uint64, []byte) (uint64, error)
+	lengthFn    func(context.Context, uint8, []byte) (uint64, error)
+	chunkSizeFn func(context.Context, uint8, []byte) (uint64, error)
+	trimFn      func(context.Context, uint8, []byte, uint64) (uint64, error)
+	openFn      func(context.Context, uint8, []byte, uint8) (bool, []byte, error)
+	closeFn     func(context.Context, uint8, []byte) ([]byte, error)
+	isOpenFn    func(context.Context, uint8, []byte) (bool, error)
+	freeFn      func(context.Context, []byte) error
 }
 
 func (driver *directLOBTestRawConn) Prepare(string) (driver.Stmt, error) {
@@ -435,11 +445,39 @@ func (driver *directLOBTestRawConn) LobSessionKey() any {
 	return driver.sessionKey
 }
 
+func (driver *directLOBTestRawConn) LobCreate(ctx context.Context, kind uint8) ([]byte, error) {
+	if driver.createFn == nil {
+		return nil, errors.New("LobCreate unused")
+	}
+	return driver.createFn(ctx, kind)
+}
+
 func (driver *directLOBTestRawConn) LobRead(ctx context.Context, kind uint8, locator []byte, offset, amount uint64) ([]byte, uint64, error) {
 	if driver.readFn == nil {
 		return nil, 0, errors.New("LobRead unused")
 	}
 	return driver.readFn(ctx, kind, locator, offset, amount)
+}
+
+func (driver *directLOBTestRawConn) LobWrite(ctx context.Context, kind uint8, locator []byte, offset uint64, data []byte) (uint64, error) {
+	if driver.writeFn == nil {
+		return 0, errors.New("LobWrite unused")
+	}
+	return driver.writeFn(ctx, kind, locator, offset, data)
+}
+
+func (driver *directLOBTestRawConn) LobLength(ctx context.Context, kind uint8, locator []byte) (uint64, error) {
+	if driver.lengthFn == nil {
+		return 0, errors.New("LobLength unused")
+	}
+	return driver.lengthFn(ctx, kind, locator)
+}
+
+func (driver *directLOBTestRawConn) LobChunkSize(ctx context.Context, kind uint8, locator []byte) (uint64, error) {
+	if driver.chunkSizeFn == nil {
+		return 0, errors.New("LobChunkSize unused")
+	}
+	return driver.chunkSizeFn(ctx, kind, locator)
 }
 
 func (driver *directLOBTestRawConn) LobTrim(ctx context.Context, kind uint8, locator []byte, length uint64) (uint64, error) {
@@ -461,4 +499,450 @@ func (driver *directLOBTestRawConn) LobClose(ctx context.Context, kind uint8, lo
 		return nil, errors.New("LobClose unused")
 	}
 	return driver.closeFn(ctx, kind, locator)
+}
+
+func (driver *directLOBTestRawConn) LobIsOpen(ctx context.Context, kind uint8, locator []byte) (bool, error) {
+	if driver.isOpenFn == nil {
+		return false, errors.New("LobIsOpen unused")
+	}
+	return driver.isOpenFn(ctx, kind, locator)
+}
+
+func (driver *directLOBTestRawConn) LobFree(ctx context.Context, locator []byte) error {
+	if driver.freeFn == nil {
+		return errors.New("LobFree unused")
+	}
+	return driver.freeFn(ctx, locator)
+}
+
+// newActiveDirectLOB creates an active DirectLOB backed by a fake raw
+// connection so API operations can be tested without an Oracle database.
+func newActiveDirectLOB(t *testing.T, raw *directLOBTestRawConn, kind Kind) *DirectLOB {
+	t.Helper()
+	return &DirectLOB{conn: newDirectLOBTestConn(t, raw), kind: kind, locator: []byte("locator"), offset: 1}
+}
+
+// TestDirectLOB_CreateAndPromoteValidation verifies temporary creation and
+// persistent promotion reject invalid arguments, state, and driver responses.
+func TestDirectLOB_CreateAndPromoteValidation(t *testing.T) {
+	t.Parallel()
+
+	// A nil connection and an invalid kind must be rejected before any RPC.
+	if _, err := CreateTemporary(context.Background(), nil, BLOB); err == nil {
+		t.Fatal("CreateTemporary accepted a nil connection")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	created := 0
+	conn := newDirectLOBTestConn(t, &directLOBTestRawConn{
+		createFn: func(_ context.Context, kind uint8) ([]byte, error) {
+			created++
+			if kind != uint8(CLOB) {
+				t.Fatalf("LobCreate kind = %d, want %d", kind, CLOB)
+			}
+			return []byte("temporary-locator"), nil
+		},
+	})
+	if _, err := CreateTemporary(context.Background(), conn, Unknown); err == nil {
+		t.Fatal("CreateTemporary accepted an invalid LOB kind")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	value, err := CreateTemporary(context.Background(), conn, CLOB)
+	if err != nil {
+		t.Fatalf("CreateTemporary returned error: %v", err)
+	}
+	if value.Kind() != CLOB || !value.IsTemporary() || value.offset != 1 || string(value.locator) != "temporary-locator" || created != 1 {
+		t.Fatalf("created DirectLOB = kind:%d temporary:%t offset:%d locator:%q calls:%d", value.Kind(), value.IsTemporary(), value.offset, value.locator, created)
+	}
+
+	// A raw connection without the private capability contract is unsupported.
+	unsupportedConn := newDirectLOBTestConn(t, &unsupportedDirectLOBTestRawConn{})
+	if _, err := CreateTemporary(context.Background(), unsupportedConn, BLOB); err == nil {
+		t.Fatal("CreateTemporary succeeded with an unsupported raw connection")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.UnsupportedLobOperation)
+	}
+
+	if _, err := OpenPersistent(context.Background(), nil, nil); err == nil {
+		t.Fatal("OpenPersistent accepted nil arguments")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := OpenPersistent(canceled, conn, &LOB{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled OpenPersistent error = %v, want context.Canceled", err)
+	}
+
+	// An unscanned LOB and a materialized source cannot be promoted.
+	var nullValue LOB
+	if _, err := OpenPersistent(context.Background(), conn, &nullValue); err == nil {
+		t.Fatal("OpenPersistent accepted an unscanned LOB")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	var materializedValue LOB
+	if err := materializedValue.Scan(&testSource{kind: BLOB}); err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if _, err := OpenPersistent(context.Background(), conn, &materializedValue); err == nil {
+		t.Fatal("OpenPersistent accepted a non-persistent source")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+
+	// Promotion also reports unsupported raw drivers and detach failures.
+	unsupportedSource := &directLOBPromotionSource{testSource: testSource{kind: BLOB}}
+	var unsupportedValue LOB
+	if err := unsupportedValue.Scan(unsupportedSource); err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if _, err := OpenPersistent(context.Background(), unsupportedConn, &unsupportedValue); err == nil {
+		t.Fatal("OpenPersistent succeeded with an unsupported raw connection")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.UnsupportedLobOperation)
+	}
+	detachErr := errors.New("detach failed")
+	detachingSource := &directLOBPromotionSource{testSource: testSource{kind: CLOB}, detachErr: detachErr}
+	var detachingValue LOB
+	if err := detachingValue.Scan(detachingSource); err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if _, err := OpenPersistent(context.Background(), conn, &detachingValue); !errors.Is(err, detachErr) {
+		t.Fatalf("OpenPersistent detach error = %v, want %v", err, detachErr)
+	}
+}
+
+// TestDirectLOB_ReadWriteAndWriteTo verifies read/write wrappers, validation,
+// cursor invalidation, and the success and error paths of WriteTo.
+func TestDirectLOB_ReadWriteAndWriteTo(t *testing.T) {
+	t.Parallel()
+
+	// Read and Write use context.Background and advance the shared cursor.
+	var writeOffset uint64
+	value := newActiveDirectLOB(t, &directLOBTestRawConn{
+		readFn: func(_ context.Context, _ uint8, _ []byte, offset, _ uint64) ([]byte, uint64, error) {
+			if offset != 1 {
+				t.Fatalf("LobRead offset = %d, want 1", offset)
+			}
+			return []byte("abc"), 3, nil
+		},
+		writeFn: func(_ context.Context, _ uint8, _ []byte, offset uint64, data []byte) (uint64, error) {
+			writeOffset = offset
+			if string(data) != "xy" {
+				t.Fatalf("LobWrite data = %q, want xy", data)
+			}
+			return 2, nil
+		},
+	}, BLOB)
+	if n, err := value.Read(make([]byte, 3)); n != 3 || err != nil {
+		t.Fatalf("Read = (%d, %v), want (3, nil)", n, err)
+	}
+	if n, err := value.Write([]byte("xy")); n != 2 || err != nil || writeOffset != 4 {
+		t.Fatalf("Write = (%d, %v), offset %d; want (2, nil), offset 4", n, err, writeOffset)
+	}
+	if n, err := value.Write(nil); n != 0 || err != nil {
+		t.Fatalf("empty Write = (%d, %v), want (0, nil)", n, err)
+	}
+
+	// ReadContext returns immediately for an empty destination and reports EOF.
+	readCalls := 0
+	empty := newActiveDirectLOB(t, &directLOBTestRawConn{
+		readFn: func(context.Context, uint8, []byte, uint64, uint64) ([]byte, uint64, error) {
+			readCalls++
+			return nil, 0, nil
+		},
+	}, BLOB)
+	if n, err := empty.ReadContext(context.Background(), nil); n != 0 || err != nil || readCalls != 0 {
+		t.Fatalf("empty ReadContext = (%d, %v), calls %d; want (0, nil), calls 0", n, err, readCalls)
+	}
+	if n, err := empty.ReadContext(context.Background(), make([]byte, 1)); n != 0 || !errors.Is(err, io.EOF) {
+		t.Fatalf("EOF ReadContext = (%d, %v), want (0, io.EOF)", n, err)
+	}
+	readErr := errors.New("read failed")
+	failedRead := newActiveDirectLOB(t, &directLOBTestRawConn{readFn: readOnce(nil, 0, readErr)}, CLOB)
+	if n, err := failedRead.ReadContext(context.Background(), make([]byte, 1)); n != 0 || !errors.Is(err, readErr) {
+		t.Fatalf("read-error ReadContext = (%d, %v), want (0, %v)", n, err, readErr)
+	}
+
+	// Character LOBs reject malformed UTF-8 before entering the raw driver.
+	invalidUTF8 := newActiveDirectLOB(t, &directLOBTestRawConn{}, CLOB)
+	if _, err := invalidUTF8.Write([]byte{0xff}); err == nil {
+		t.Fatal("Write accepted invalid CLOB UTF-8")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	// An impossible acknowledgement invalidates the cursor after the response.
+	invalidAck := newActiveDirectLOB(t, &directLOBTestRawConn{
+		writeFn: func(context.Context, uint8, []byte, uint64, []byte) (uint64, error) { return 3, nil },
+	}, BLOB)
+	if _, err := invalidAck.Write([]byte("ab")); err == nil {
+		t.Fatal("Write accepted an acknowledgement larger than the payload")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	if _, err := invalidAck.Read(make([]byte, 1)); err == nil {
+		t.Fatal("Read succeeded after an invalid write acknowledgement")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.LobValueInvalidated)
+	}
+	writeErr := errors.New("write failed")
+	failedWrite := newActiveDirectLOB(t, &directLOBTestRawConn{
+		writeFn: func(context.Context, uint8, []byte, uint64, []byte) (uint64, error) { return 0, writeErr },
+	}, BLOB)
+	if _, err := failedWrite.Write([]byte("data")); !errors.Is(err, writeErr) {
+		t.Fatalf("Write error = %v, want %v", err, writeErr)
+	}
+
+	// Table-driven cases cover all WriteTo result classifications.
+	writerErr := errors.New("writer failed")
+	cases := []struct {
+		name       string
+		raw        *directLOBTestRawConn
+		writer     io.Writer
+		wantBytes  int64
+		wantErr    error
+		wantCode   oracleErrors.ErrorCode
+		wantOutput string
+	}{
+		{name: "nil writer", wantCode: oracleErrors.InvalidLOBBuffer},
+		{name: "complete", raw: &directLOBTestRawConn{readFn: readOnce([]byte("data"), 4, nil)}, writer: &bytes.Buffer{}, wantBytes: 4, wantOutput: "data"},
+		{name: "writer error", raw: &directLOBTestRawConn{readFn: readOnce([]byte("data"), 4, nil)}, writer: &directLOBTestWriter{err: writerErr, max: -1}, wantBytes: 4, wantErr: writerErr},
+		{name: "short writer", raw: &directLOBTestRawConn{readFn: readOnce([]byte("data"), 4, nil)}, writer: &directLOBTestWriter{max: 1}, wantBytes: 1, wantErr: io.ErrShortWrite},
+		{name: "read error", raw: &directLOBTestRawConn{readFn: readOnce(nil, 0, readErr)}, writer: io.Discard, wantErr: readErr},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var value *DirectLOB
+			if tc.raw != nil {
+				value = newActiveDirectLOB(t, tc.raw, BLOB)
+			}
+			var got int64
+			var err error
+			if value == nil {
+				var zero DirectLOB
+				got, err = zero.WriteTo(tc.writer)
+			} else {
+				got, err = value.WriteTo(tc.writer)
+			}
+			if got != tc.wantBytes {
+				t.Errorf("WriteTo bytes = %d, want %d", got, tc.wantBytes)
+			}
+			if tc.wantCode != "" {
+				requireLOBTestErrorCode(t, err, tc.wantCode)
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Errorf("WriteTo error = %v, want %v", err, tc.wantErr)
+			}
+			if output, ok := tc.writer.(*bytes.Buffer); ok && output.String() != tc.wantOutput {
+				t.Errorf("WriteTo output = %q, want %q", output.String(), tc.wantOutput)
+			}
+		})
+	}
+}
+
+// readOnce returns one configured response followed by the logical EOF used by
+// ReadContext and WriteTo tests.
+func readOnce(data []byte, logical uint64, err error) func(context.Context, uint8, []byte, uint64, uint64) ([]byte, uint64, error) {
+	used := false
+	return func(context.Context, uint8, []byte, uint64, uint64) ([]byte, uint64, error) {
+		if used {
+			return nil, 0, nil
+		}
+		used = true
+		return data, logical, err
+	}
+}
+
+// directLOBTestWriter provides controllable writer errors and short writes for
+// testing DirectLOB.WriteTo result handling.
+type directLOBTestWriter struct {
+	err error
+	max int
+}
+
+func (writer *directLOBTestWriter) Write(data []byte) (int, error) {
+	written := len(data)
+	if writer.max >= 0 && written > writer.max {
+		written = writer.max
+	}
+	return written, writer.err
+}
+
+// TestDirectLOB_OperationsAndLifecycle verifies scalar operations, closed-state
+// guards, trim/open behavior, temporary and persistent cleanup, and retries.
+func TestDirectLOB_OperationsAndLifecycle(t *testing.T) {
+	t.Parallel()
+
+	// Successful scalar operations delegate their values and local properties.
+	scalar := newActiveDirectLOB(t, &directLOBTestRawConn{
+		lengthFn:    func(context.Context, uint8, []byte) (uint64, error) { return 17, nil },
+		chunkSizeFn: func(context.Context, uint8, []byte) (uint64, error) { return 8, nil },
+		isOpenFn:    func(context.Context, uint8, []byte) (bool, error) { return true, nil },
+	}, NCLOB)
+	if size, err := scalar.Size(context.Background()); size != 17 || err != nil {
+		t.Fatalf("Size = (%d, %v), want (17, nil)", size, err)
+	}
+	if size, err := scalar.ChunkSize(context.Background()); size != 8 || err != nil {
+		t.Fatalf("ChunkSize = (%d, %v), want (8, nil)", size, err)
+	}
+	if open, err := scalar.IsOpen(context.Background()); !open || err != nil || scalar.Kind() != NCLOB || scalar.IsTemporary() {
+		t.Fatalf("scalar state = open:%t err:%v kind:%d temporary:%t", open, err, scalar.Kind(), scalar.IsTemporary())
+	}
+
+	// Scalar RPC errors and an unsigned-to-int64 overflow are returned unchanged.
+	lengthErr := errors.New("length failed")
+	chunkErr := errors.New("chunk size failed")
+	openErr := errors.New("open-state failed")
+	errorsValue := newActiveDirectLOB(t, &directLOBTestRawConn{
+		lengthFn:    func(context.Context, uint8, []byte) (uint64, error) { return 0, lengthErr },
+		chunkSizeFn: func(context.Context, uint8, []byte) (uint64, error) { return 0, chunkErr },
+		isOpenFn:    func(context.Context, uint8, []byte) (bool, error) { return false, openErr },
+	}, BLOB)
+	if _, err := errorsValue.Size(context.Background()); !errors.Is(err, lengthErr) {
+		t.Fatalf("Size error = %v, want %v", err, lengthErr)
+	}
+	if _, err := errorsValue.ChunkSize(context.Background()); !errors.Is(err, chunkErr) {
+		t.Fatalf("ChunkSize error = %v, want %v", err, chunkErr)
+	}
+	if _, err := errorsValue.IsOpen(context.Background()); !errors.Is(err, openErr) {
+		t.Fatalf("IsOpen error = %v, want %v", err, openErr)
+	}
+	overflow := newActiveDirectLOB(t, &directLOBTestRawConn{
+		lengthFn: func(context.Context, uint8, []byte) (uint64, error) { return ^uint64(0), nil },
+	}, BLOB)
+	if _, err := overflow.Size(context.Background()); err == nil {
+		t.Fatal("Size accepted a value larger than int64")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+
+	// Every operation must reject a locally closed handle before an RPC.
+	closed := newActiveDirectLOB(t, &directLOBTestRawConn{}, BLOB)
+	if err := closed.Close(); err != nil {
+		t.Fatalf("Close returned error: %v", err)
+	}
+	closedOperations := []struct {
+		name string
+		call func() error
+	}{
+		{name: "WriteContext", call: func() error { _, err := closed.WriteContext(context.Background(), []byte("data")); return err }},
+		{name: "Trim", call: func() error { return closed.Trim(context.Background(), 0) }},
+		{name: "Open", call: func() error { _, err := closed.Open(context.Background(), ReadOnly); return err }},
+		{name: "CloseServer", call: func() error { return closed.CloseServer(context.Background()) }},
+		{name: "IsOpen", call: func() error { _, err := closed.IsOpen(context.Background()); return err }},
+	}
+	for _, operation := range closedOperations {
+		t.Run(operation.name, func(t *testing.T) {
+			if err := operation.call(); err == nil {
+				t.Fatal("operation succeeded after Close")
+			} else {
+				requireLOBTestErrorCode(t, err, oracleErrors.LobValueClosed)
+			}
+		})
+	}
+	// The Raw bridge rejects a driver without DirectLOB capabilities.
+	unsupported := &DirectLOB{conn: newDirectLOBTestConn(t, &unsupportedDirectLOBTestRawConn{}), kind: BLOB, locator: []byte("locator"), offset: 1}
+	if _, err := unsupported.Read(make([]byte, 1)); err == nil {
+		t.Fatal("Read succeeded with an unsupported raw connection")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.UnsupportedLobOperation)
+	}
+
+	// Trim validates negative lengths and preserves pending data on RPC failure.
+	var zero DirectLOB
+	if err := zero.Trim(context.Background(), -1); err == nil {
+		t.Fatal("Trim accepted a negative length")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	trimErr := errors.New("trim failed")
+	trimValue := newActiveDirectLOB(t, &directLOBTestRawConn{
+		trimFn: func(context.Context, uint8, []byte, uint64) (uint64, error) { return 0, trimErr },
+	}, BLOB)
+	trimValue.pending = []byte("pending")
+	if err := trimValue.Trim(context.Background(), 3); !errors.Is(err, trimErr) || string(trimValue.pending) != "pending" {
+		t.Fatalf("failed Trim = error:%v pending:%q, want %v and pending", err, trimValue.pending, trimErr)
+	}
+
+	// Temporary Open updates the locator without setting persistent serverOpen.
+	temporary := newActiveDirectLOB(t, &directLOBTestRawConn{
+		openFn: func(_ context.Context, kind uint8, locator []byte, mode uint8) (bool, []byte, error) {
+			if kind != uint8(BLOB) || mode != uint8(ReadWrite) || string(locator) != "locator" {
+				t.Fatalf("LobOpen arguments = kind:%d mode:%d locator:%q", kind, mode, locator)
+			}
+			return true, []byte("opened-locator"), nil
+		},
+	}, BLOB)
+	temporary.temporary = true
+	if opened, err := temporary.Open(context.Background(), ReadWrite); !opened || err != nil || temporary.serverOpen || string(temporary.locator) != "opened-locator" {
+		t.Fatalf("temporary Open = (%t, %v), state serverOpen:%t locator:%q", opened, err, temporary.serverOpen, temporary.locator)
+	}
+	var invalidMode DirectLOB
+	if _, err := invalidMode.Open(context.Background(), OpenMode(99)); err == nil {
+		t.Fatal("Open accepted an invalid mode")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	openErr = errors.New("open failed")
+	openFailure := newActiveDirectLOB(t, &directLOBTestRawConn{
+		openFn: func(context.Context, uint8, []byte, uint8) (bool, []byte, error) { return false, nil, openErr },
+	}, BLOB)
+	if opened, err := openFailure.Open(context.Background(), ReadOnly); opened || !errors.Is(err, openErr) {
+		t.Fatalf("Open failure = (%t, %v), want (false, %v)", opened, err, openErr)
+	}
+
+	// Free is idempotent, supports persistent handles, and retries temporary RPCs.
+	persistent := newActiveDirectLOB(t, &directLOBTestRawConn{}, BLOB)
+	if err := persistent.Free(context.Background()); err != nil {
+		t.Fatalf("persistent Free returned error: %v", err)
+	}
+	if err := persistent.Free(context.Background()); err != nil {
+		t.Fatalf("second persistent Free returned error: %v", err)
+	}
+	if _, err := persistent.Size(context.Background()); err == nil {
+		t.Fatal("Size succeeded after persistent Free")
+	} else {
+		requireLOBTestErrorCode(t, err, oracleErrors.LobValueClosed)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := newActiveDirectLOB(t, &directLOBTestRawConn{}, BLOB).Free(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled Free error = %v, want context.Canceled", err)
+	}
+	freeErr := errors.New("free failed")
+	freeCalls := 0
+	temporaryFree := newActiveDirectLOB(t, &directLOBTestRawConn{
+		freeFn: func(context.Context, []byte) error {
+			freeCalls++
+			if freeCalls == 1 {
+				return freeErr
+			}
+			return nil
+		},
+	}, CLOB)
+	temporaryFree.temporary = true
+	if err := temporaryFree.Free(context.Background()); !errors.Is(err, freeErr) {
+		t.Fatalf("first temporary Free error = %v, want %v", err, freeErr)
+	}
+	if err := temporaryFree.Free(context.Background()); err != nil {
+		t.Fatalf("retry temporary Free returned error: %v", err)
+	}
+	if err := temporaryFree.Free(context.Background()); err != nil || freeCalls != 2 || !temporaryFree.closed || !temporaryFree.freed {
+		t.Fatalf("temporary Free state = err:%v calls:%d closed:%t freed:%t", err, freeCalls, temporaryFree.closed, temporaryFree.freed)
+	}
+}
+
+// unsupportedDirectLOBTestRawConn is a database/sql connection that does not
+// implement the private DirectLOB driver capability contract.
+type unsupportedDirectLOBTestRawConn struct{}
+
+func (*unsupportedDirectLOBTestRawConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unused")
+}
+
+func (*unsupportedDirectLOBTestRawConn) Close() error { return nil }
+
+func (*unsupportedDirectLOBTestRawConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("unused")
 }

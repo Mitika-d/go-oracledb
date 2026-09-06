@@ -44,6 +44,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -330,6 +331,198 @@ func TestClobExecutor_DecodeReadPayloadRejectsIncompleteCharacter(t *testing.T) 
 	requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
 
 	_, _, err = executor.decodeReadPayload(loc, true, []byte{0xD8, 0x3D})
+	requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+
+	if payload, logical, err := executor.decodeReadPayload(loc, false, nil); err != nil || payload != nil || logical != 0 {
+		t.Fatalf("empty decodeReadPayload = (%q, %d, %v), want (nil, 0, nil)", payload, logical, err)
+	}
+}
+
+// TestClobExecutor_CharacterConversionHelpers verifies both byte orders,
+// surrogate handling, and destination validation without a TTC exchange.
+func TestClobExecutor_CharacterConversionHelpers(t *testing.T) {
+	t.Parallel()
+
+	executor := newClobExecutor(newShelf[driverCommon.MessageType]().Shelf, newTestSessionContext())
+	runes := []rune("A🙂")
+	bigEndian := []byte{0x00, 0x41, 0xD8, 0x3D, 0xDE, 0x42}
+	littleEndian := []byte{0x41, 0x00, 0x3D, 0xD8, 0x42, 0xDE}
+
+	for _, test := range []struct {
+		name     string
+		variable bool
+		little   bool
+		want     []byte
+	}{
+		{name: "fixed big endian", want: bigEndian},
+		{name: "fixed little endian", little: true, want: littleEndian},
+		{name: "variable big endian", variable: true, want: bigEndian},
+		{name: "variable little endian", variable: true, little: true, want: littleEndian},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			encoded := make([]byte, len(test.want))
+			bytesWritten, units, processed := executor.encodeLobCharPayload(runes, 0, len(runes), encoded, test.variable, test.little)
+			if bytesWritten != len(test.want) || units != 3 || processed != len(runes) || !bytes.Equal(encoded, test.want) {
+				t.Fatalf("encoded = (%d, %d, %d, % X), want (%d, 3, 2, % X)", bytesWritten, units, processed, encoded, len(test.want), test.want)
+			}
+
+			decoded := make([]rune, 3)
+			decoded[0] = 'x'
+			count, err := executor.decodeVariableWidthCharSet(test.want, decoded, 1, test.little)
+			if err != nil || count != 2 || string(decoded) != "xA🙂" {
+				t.Fatalf("decoded = (%q, %d, %v), want (xA🙂, 2, nil)", string(decoded), count, err)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		call func() (int, int, int)
+	}{
+		{
+			name: "empty source window",
+			call: func() (int, int, int) {
+				return executor.encodeLobCharPayload(runes, len(runes), 1, make([]byte, 4), false, false)
+			},
+		},
+		{
+			name: "variable buffer too small",
+			call: func() (int, int, int) {
+				return executor.encodeLobCharPayload(runes, 0, len(runes), make([]byte, 1), true, false)
+			},
+		},
+		{
+			name: "fixed buffer too small",
+			call: func() (int, int, int) {
+				return executor.encodeLobCharPayload(runes, 0, len(runes), make([]byte, 1), false, false)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bytesWritten, units, processed := test.call()
+			if test.name == "empty source window" {
+				if bytesWritten != 0 || units != 0 || processed != 0 {
+					t.Fatalf("empty window result = (%d, %d, %d), want zeros", bytesWritten, units, processed)
+				}
+				return
+			}
+			if bytesWritten != -1 || units != -1 || processed != len(runes) {
+				t.Fatalf("short buffer result = (%d, %d, %d), want (-1, -1, 2)", bytesWritten, units, processed)
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name   string
+		data   []byte
+		little bool
+		want   []uint16
+	}{
+		{name: "big endian", data: bigEndian, want: []uint16{0x41, 0xD83D, 0xDE42}},
+		{name: "little endian", data: littleEndian, little: true, want: []uint16{0x41, 0xD83D, 0xDE42}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			units, err := readUTF16CodeUnits(test.data, test.little)
+			if err != nil || !reflect.DeepEqual(units, test.want) {
+				t.Fatalf("readUTF16CodeUnits = (%v, %v), want (%v, nil)", units, err, test.want)
+			}
+			encoded := make([]byte, len(test.data))
+			if written := writeUTF16ToBuffer(test.want, encoded, test.little); written != len(encoded) || !bytes.Equal(encoded, test.data) {
+				t.Fatalf("writeUTF16ToBuffer = (%d, % X), want (%d, % X)", written, encoded, len(encoded), test.data)
+			}
+		})
+	}
+
+	if got := getByteBufferSizeForConversion(false, 0); got != 0 {
+		t.Fatalf("zero-character buffer size = %d, want 0", got)
+	}
+	if got := getByteBufferSizeForConversion(true, -1); got != 0 {
+		t.Fatalf("negative-character buffer size = %d, want 0", got)
+	}
+	if got, err := executor.logicalAmount(runes); err != nil || got != 3 {
+		t.Fatalf("logicalAmount = (%d, %v), want (3, nil)", got, err)
+	}
+
+	for _, test := range []struct {
+		name string
+		data []byte
+		want []rune
+	}{
+		{name: "fixed UTF-8", data: []byte("A🙂"), want: []rune("A🙂")},
+		{name: "fixed malformed UTF-8", data: []byte{0xFF}, want: []rune(string([]byte{0xEF, 0xBF, 0xBD}))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out := make([]rune, len(test.want))
+			count, err := executor.decodeFixedWidthCharSet(test.data, out, 0, false, false)
+			if err != nil || count != len(test.want) || !reflect.DeepEqual(out, test.want) {
+				t.Fatalf("decodeFixedWidthCharSet = (%q, %d, %v), want (%q, %d, nil)", string(out), count, err, string(test.want), len(test.want))
+			}
+		})
+	}
+
+	for _, test := range []struct {
+		name string
+		data []byte
+	}{
+		{name: "unpaired high surrogate", data: []byte{0xD8, 0x3D}},
+		{name: "unpaired low surrogate", data: []byte{0xDE, 0x42}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := validateCompleteUTF16Payload(test.data, false); err == nil {
+				t.Fatal("validateCompleteUTF16Payload unexpectedly accepted an unpaired surrogate")
+			} else {
+				requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+			}
+		})
+	}
+
+	if _, err := executor.decodeVariableWidthCharSet(bigEndian, make([]rune, 1), 0, false); err == nil {
+		t.Fatal("decodeVariableWidthCharSet accepted an undersized output buffer")
+	} else {
+		requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	if _, err := executor.decodeVariableWidthCharSet([]byte{0x00}, make([]rune, 1), 0, false); err == nil {
+		t.Fatal("decodeVariableWidthCharSet accepted an odd UTF-16 payload")
+	} else {
+		requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	if _, err := executor.decodeFixedWidthCharSet([]byte("A🙂"), make([]rune, 1), 0, false, false); err == nil {
+		t.Fatal("decodeFixedWidthCharSet accepted an undersized output buffer")
+	} else {
+		requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	if got := writeUTF16ToBuffer([]uint16{1}, make([]byte, 1), false); got != -1 {
+		t.Fatalf("short UTF-16 write = %d, want -1", got)
+	}
+}
+
+// TestClobExecutor_OpenRejectsBFileMode verifies CLOB executors reject the
+// BFILE-only open mode before touching the TTC stream.
+func TestClobExecutor_OpenRejectsBFileMode(t *testing.T) {
+	t.Parallel()
+
+	executor := newClobExecutor(newShelf[driverCommon.MessageType]().Shelf, newTestSessionContext())
+	if opened, err := executor.open(context.Background(), newLocator(newTestLocator(false), 1), bfileOpenModeReadOnly); opened || err == nil {
+		t.Fatalf("open result = (%t, %v), want UnsupportedLobOperation", opened, err)
+	} else {
+		requireErrorCode(t, err, oracleErrors.UnsupportedLobOperation)
+	}
+}
+
+// TestClobExecutor_ReadRejectsLogicalAmountMismatch verifies a decoded payload
+// cannot contradict the server-reported UTF-16 amount.
+func TestClobExecutor_ReadRejectsLogicalAmountMismatch(t *testing.T) {
+	t.Parallel()
+
+	setup := newClobExecutorWithStub(lobExecutorScenario{
+		events: []driverCommon.Message[driverCommon.MessageType]{newTTIlobd(), newTTILobRPA(), &mockOer{}},
+	})
+	setup.stub.lobdPayloads = [][]byte{[]byte("a")}
+	setup.stub.lobRpaAmounts = []driverCommon.UB8{2}
+	_, _, err := setup.clob.read(context.Background(), newLocator(newTestLocator(false), 1), 2, false)
+	if err == nil {
+		t.Fatal("read unexpectedly accepted a mismatched logical amount")
+	}
 	requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
 }
 

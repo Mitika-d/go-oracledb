@@ -271,13 +271,12 @@ func (c *clobExecutor) isOpen(ctx context.Context, lobLocator *locator) (bool, e
 func (c *clobExecutor) createTemporaryLob(ctx context.Context, cache bool, duration driverCommon.UB4, formOfUse driverCommon.UB2) (driverCommon.B1Array, error) {
 	tempSize := kolllTempWithSignature
 
-	// FormChar LOBs inherit the session database character set advertised by the driver
-	// policy. This keeps locator creation aligned with the negotiated server character set which
-	// is AL32UTF8.
+	// FormChar LOBs use the driver's configured database-character-set policy. The
+	// current supported and validated profile is AL32UTF8.
 	charsetID := c.policy.driverCS
 	if formOfUse != FormChar {
-		// FormNChar LOBs must advertise the session's national character set so the server
-		// materialises the NCLOB using the negotiated NCHAR semantics.
+		// FormNChar LOBs use the configured national-character-set policy. The
+		// current supported and validated profile is AL16UTF16.
 		charsetID = c.policy.ncharCS
 	}
 
@@ -311,9 +310,9 @@ func (c *clobExecutor) createTemporaryLob(ctx context.Context, cache bool, durat
 	return def.sourceLocator.locatorBytes, nil
 }
 
-// write mirrors the database CLOB write path, performing character to byte conversion before
-// delegating to the shared lobExecutor write helper. The current implementation uses placeholder
-// charset conversion logic and should be replaced once the converter package is available.
+// write mirrors the database CLOB write path, converting characters according
+// to the current LOB character-set policy before delegating to the shared
+// lobExecutor write helper.
 //
 // Parameters:
 //   - ctx: request-scoped context for cancellation and deadlines.
@@ -352,9 +351,8 @@ func (c *clobExecutor) write(
 
 	// first see if variable length character set.
 	// Temporary CLOB locators do not reliably carry the variable-width flag
-	// before their first write. For database CLOBs, derive the encoding from
-	// the negotiated driver character set; NCLOB retains locator-derived
-	// AL16UTF16 semantics.
+	// before their first write. For database CLOBs, use the configured driver
+	// character-set policy; NCLOB retains locator-derived AL16UTF16 semantics.
 	varWidthChar := lobLocator.isLobCharsetVariableWidth()
 	if !isNCLOB && c.policy.driverCS == al32Utf8CharSet {
 		varWidthChar = true
@@ -747,8 +745,8 @@ func (c *clobExecutor) encodeFixedWidthCharSet(
 	return bytesWritten, len(codeUnits)
 }
 
-// decodeLobCharPayload converts TTC-encoded bytes into runes using the placeholder charset rules
-// shared with encodeLobCharPayload.
+// decodeLobCharPayload converts TTC-encoded bytes into runes using the same
+// locator-metadata-based character-set rules as encodeLobCharPayload.
 //
 // Description:
 //

@@ -43,7 +43,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
 	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
@@ -53,6 +56,48 @@ import (
 // lobEventRecorder records event delivery for tests in this package.
 type lobEventRecorder struct {
 	events []eventType
+}
+
+// streamedLobWriteFunc adapts a small write callback for WriterTo tests.
+type streamedLobWriteFunc func([]byte) (int, error)
+
+// admissionCancellationContext cancels between state validation and operation
+// admission so callers can exercise the narrow cancellation race deterministically.
+type admissionCancellationContext struct {
+	checked chan struct{}
+	done    chan struct{}
+	once    sync.Once
+}
+
+// Deadline implements context.Context for admissionCancellationContext.
+func (*admissionCancellationContext) Deadline() (time.Time, bool) {
+	return time.Time{}, false
+}
+
+// Done implements context.Context for admissionCancellationContext.
+func (ctx *admissionCancellationContext) Done() <-chan struct{} { return ctx.done }
+
+// Err returns nil for the initial state check and waits for cancellation on the
+// subsequent operation-admission check.
+func (ctx *admissionCancellationContext) Err() error {
+	initial := false
+	ctx.once.Do(func() {
+		initial = true
+		close(ctx.checked)
+	})
+	if initial {
+		return nil
+	}
+	<-ctx.done
+	return context.Canceled
+}
+
+// Value implements context.Context for admissionCancellationContext.
+func (*admissionCancellationContext) Value(any) any { return nil }
+
+// Write delegates one WriterTo write to the configured test behavior.
+func (writer streamedLobWriteFunc) Write(data []byte) (int, error) {
+	return writer(data)
 }
 
 // notify implements EventListener.
@@ -421,6 +466,85 @@ func TestStreamedLob_ReadCancellationBeforeRPCInvalidatesValue(t *testing.T) {
 	}
 }
 
+// TestStreamedLob_AdmissionCancellationInvalidatesOperations verifies that a
+// context canceled after state validation but before TTC admission invalidates
+// Read, Size, and ChunkSize without sending an exchange.
+func TestStreamedLob_AdmissionCancellationInvalidatesOperations(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name  string
+		value func(*testing.T, *ttcRows) (*streamedLob, *fakeStreamer)
+		call  func(*streamedLob) error
+	}{
+		// Read must fail closed when cancellation wins before locator admission.
+		{
+			name: "Read",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedBlob(t, rows, 1, nil)
+			},
+			call: func(value *streamedLob) error {
+				_, err := value.Read(make([]byte, 1))
+				return err
+			},
+		},
+		// Size must not issue a metadata request after admission is canceled.
+		{
+			name: "Size",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedClob(t, rows, 1, nil)
+			},
+			call: func(value *streamedLob) error {
+				_, err := value.Size()
+				return err
+			},
+		},
+		// ChunkSize follows the same admission and invalidation contract.
+		{
+			name: "ChunkSize",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedClob(t, rows, 1, nil)
+			},
+			call: func(value *streamedLob) error {
+				_, err := value.ChunkSize()
+				return err
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			rows := newLobTestRows()
+			admission := &admissionCancellationContext{
+				checked: make(chan struct{}),
+				done:    make(chan struct{}),
+			}
+			rows.mu.Lock()
+			rows.lifecycle.ctx = admission
+			rows.mu.Unlock()
+			value, streamer := test.value(t, rows)
+			mustRegisterLob(t, rows, value)
+
+			result := make(chan error, 1)
+			go func() { result <- test.call(value) }()
+			select {
+			case <-admission.checked:
+			case err := <-result:
+				t.Fatalf("operation completed before admission cancellation: %v", err)
+			}
+			close(admission.done)
+
+			if err := <-result; err == nil {
+				t.Fatal("operation unexpectedly succeeded after admission cancellation")
+			} else {
+				requireErrorCode(t, err, oracleErrors.LobValueInvalidated)
+			}
+			if len(streamer.pushed) != 0 {
+				t.Fatalf("canceled operation sent %d TTC messages, want 0", len(streamer.pushed))
+			}
+		})
+	}
+}
+
 // TestStreamedLob_RowsCloseInvalidatesLob verifies that Rows.Close invalidates
 // an unread locator-backed value before later reads can issue RPCs.
 func TestStreamedLob_RowsCloseInvalidatesLob(t *testing.T) {
@@ -611,6 +735,78 @@ func TestStreamedLob_RPCFailuresApplySessionSafetyPolicy(t *testing.T) {
 	}
 }
 
+// TestStreamedLob_MetadataRPCFailuresApplySessionSafetyPolicy verifies that
+// Size and ChunkSize preserve completed responses but invalidate unsafe streams.
+func TestStreamedLob_MetadataRPCFailuresApplySessionSafetyPolicy(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		call       func(*streamedLob) error
+		completed  bool
+		wantClosed bool
+	}{
+		// A consumed Oracle error is safe to return without closing Rows.
+		{
+			name:      "Size completed response",
+			completed: true,
+			call: func(value *streamedLob) error {
+				_, err := value.Size()
+				return err
+			},
+		},
+		// A transport failure leaves the ordered TTC stream unsafe.
+		{
+			name:       "Size unsafe transport",
+			wantClosed: true,
+			call: func(value *streamedLob) error {
+				_, err := value.Size()
+				return err
+			},
+		},
+		// Chunk-size metadata uses the same completed-response policy.
+		{
+			name:      "ChunkSize completed response",
+			completed: true,
+			call: func(value *streamedLob) error {
+				_, err := value.ChunkSize()
+				return err
+			},
+		},
+		// Chunk-size transport failure must invalidate the owning Rows.
+		{
+			name:       "ChunkSize unsafe transport",
+			wantClosed: true,
+			call: func(value *streamedLob) error {
+				_, err := value.ChunkSize()
+				return err
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			rows := newLobTestRows()
+			value, streamer := newTestStreamedClob(t, rows, 1, nil)
+			if test.completed {
+				appendTestLobResponse(streamer, nil, 0, errors.New("server rejected metadata request"))
+			} else {
+				streamer.pullErr = errors.New("metadata transport failed")
+			}
+			mustRegisterLob(t, rows, value)
+
+			if err := test.call(value); err == nil {
+				t.Fatal("metadata operation unexpectedly succeeded")
+			}
+			if rows.isClosed() != test.wantClosed {
+				t.Fatalf("Rows closed = %t, want %t", rows.isClosed(), test.wantClosed)
+			}
+			if len(rows.lifecycle.lobs) != 0 {
+				t.Fatalf("outstanding LOB count = %d, want 0", len(rows.lifecycle.lobs))
+			}
+		})
+	}
+}
+
 // TestStreamedLob_CloseReleasesRowsOwnershipAndIsIdempotent verifies local
 // close behavior and removal from the Rows LOB registry.
 func TestStreamedLob_CloseReleasesRowsOwnershipAndIsIdempotent(t *testing.T) {
@@ -626,6 +822,16 @@ func TestStreamedLob_CloseReleasesRowsOwnershipAndIsIdempotent(t *testing.T) {
 	}
 	if _, err := value.Read(make([]byte, 1)); err == nil {
 		t.Fatal("Read after Close unexpectedly succeeded")
+	} else {
+		requireErrorCode(t, err, oracleErrors.LobValueClosed)
+	}
+	if _, err := value.ChunkSize(); err == nil {
+		t.Fatal("ChunkSize after Close unexpectedly succeeded")
+	} else {
+		requireErrorCode(t, err, oracleErrors.LobValueClosed)
+	}
+	if _, err := value.Size(); err == nil {
+		t.Fatal("Size after Close unexpectedly succeeded")
 	} else {
 		requireErrorCode(t, err, oracleErrors.LobValueClosed)
 	}
@@ -658,6 +864,302 @@ func TestStreamedLob_ClobPrefixConversionUsesCorrectLogicalUnits(t *testing.T) {
 	}
 	if !bytes.Equal(payload, []byte("🙂")) || logical != 2 {
 		t.Fatalf("NCLOB prefix = (%q, %d), want (🙂, 2 UTF-16 units)", payload, logical)
+	}
+}
+
+// TestStreamedLob_ConstructorRejectsUnsupportedSources verifies constructor
+// validation happens before a streamed value is exposed to callers.
+func TestStreamedLob_ConstructorRejectsUnsupportedSources(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		owner     func() *ttcRows
+		dtype     DtyType
+		prefix    []byte
+		locator   func() driverCommon.B1Array
+		wantError oracleErrors.ErrorCode
+	}{
+		{name: "missing locator metadata", owner: newLobTestRows, dtype: DtyBlob, wantError: oracleErrors.InvalidLobSource},
+		{
+			name: "temporary locator", owner: newLobTestRows, dtype: DtyBlob,
+			locator: func() driverCommon.B1Array {
+				locator := make(driverCommon.B1Array, koll4FlagOffset+1)
+				locator[koll4FlagOffset] = kolblTemporaryFlagByte
+				return locator
+			},
+			wantError: oracleErrors.InvalidLobSource,
+		},
+		{
+			name: "malformed CLOB prefix",
+			owner: func() *ttcRows {
+				rows := newLobTestRows()
+				rows.sessionContext = newTestSessionContext()
+				return rows
+			},
+			dtype:     DtyClob,
+			prefix:    []byte{0xff},
+			locator:   func() driverCommon.B1Array { return make(driverCommon.B1Array, koll4FlagOffset+1) },
+			wantError: oracleErrors.InvalidLOBBuffer,
+		},
+		{
+			name: "abstract locator", owner: newLobTestRows, dtype: DtyBlob,
+			locator: func() driverCommon.B1Array {
+				locator := make(driverCommon.B1Array, koll4FlagOffset+1)
+				locator[koll1FlagOffset] = kolblAbstractLocatorFlag
+				return locator
+			},
+			wantError: oracleErrors.InvalidLobSource,
+		},
+		{
+			name: "unsupported datatype",
+			owner: func() *ttcRows {
+				rows := newLobTestRows()
+				rows.sessionContext = newTestSessionContext()
+				return rows
+			},
+			dtype:     DtyType(0xff),
+			locator:   func() driverCommon.B1Array { return make(driverCommon.B1Array, koll4FlagOffset+1) },
+			wantError: oracleErrors.InvalidLobSource,
+		},
+		{name: "missing session state", owner: func() *ttcRows { return newTTCRows(nil) }, dtype: DtyBlob, locator: func() driverCommon.B1Array { return make(driverCommon.B1Array, koll4FlagOffset+1) }, wantError: oracleErrors.InvalidLobInput},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			locator := test.locator
+			if locator == nil {
+				locator = func() driverCommon.B1Array { return nil }
+			}
+			_, err := newStreamedLob(test.owner(), test.dtype, test.prefix, lobColumnContext{lobLocator: locator()})
+			if err == nil {
+				t.Fatal("newStreamedLob unexpectedly succeeded")
+			}
+			requireErrorCode(t, err, test.wantError)
+		})
+	}
+}
+
+// TestStreamedLob_DetachRejectsWrongOwnerAndInvalidatedValues verifies
+// promotion cannot cross connection or lifecycle boundaries.
+func TestStreamedLob_DetachRejectsWrongOwnerAndInvalidatedValues(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		setup  func(*streamedLob)
+		key    any
+		verify func(*testing.T, error)
+	}{
+		{name: "different shelf", key: newShelf[driverCommon.MessageType](), verify: func(t *testing.T, err error) { requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer) }},
+		{name: "invalidated value", setup: func(value *streamedLob) { value.invalidate() }, verify: func(t *testing.T, err error) { requireErrorCode(t, err, oracleErrors.LobValueInvalidated) }},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			rows := newLobTestRows()
+			value, _ := newTestStreamedBlob(t, rows, 1, nil)
+			mustRegisterLob(t, rows, value)
+			if test.setup != nil {
+				test.setup(value)
+			}
+			_, err := value.DetachPersistentLocator(test.key)
+			if err == nil {
+				t.Fatal("DetachPersistentLocator unexpectedly succeeded")
+			}
+			test.verify(t, err)
+			_ = value.Close()
+		})
+	}
+}
+
+// TestStreamedLob_BufferedRefillIsConsumedBeforeAnotherRPC verifies a partial
+// caller read retains and then drains a converted refill.
+func TestStreamedLob_BufferedRefillIsConsumedBeforeAnotherRPC(t *testing.T) {
+	t.Parallel()
+
+	rows := newLobTestRows()
+	value, streamer := newTestStreamedBlob(t, rows, 4, nil)
+	appendTestLobResponse(streamer, []byte("abcd"), 4, nil)
+	mustRegisterLob(t, rows, value)
+	if n, err := value.Read(nil); n != 0 || err != nil {
+		t.Fatalf("zero-length Read = (%d, %v), want (0, nil)", n, err)
+	}
+	first := make([]byte, 1)
+	if n, err := value.Read(first); n != 1 || err != nil || string(first) != "a" {
+		t.Fatalf("first Read = (%d, %v, %q), want (1, nil, a)", n, err, first)
+	}
+	if len(value.pending) != 3 {
+		t.Fatalf("pending bytes after partial refill = %d, want 3", len(value.pending))
+	}
+	remaining := make([]byte, 3)
+	if n, err := value.Read(remaining); n != 3 || err != nil || string(remaining) != "bcd" {
+		t.Fatalf("second Read = (%d, %v, %q), want (3, nil, bcd)", n, err, remaining)
+	}
+	if len(streamer.pushed) != 1 || len(rows.lifecycle.lobs) != 0 {
+		t.Fatalf("after buffered refill: RPCs=%d outstanding=%d, want 1 and 0", len(streamer.pushed), len(rows.lifecycle.lobs))
+	}
+}
+
+// TestStreamedLob_MetadataOperationsUseCachedAndServerLengths verifies BLOB
+// sizes are local while CLOB sizes and chunk sizes use the TTC manager.
+func TestStreamedLob_MetadataOperationsUseCachedAndServerLengths(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		value  func(*testing.T, *ttcRows) (*streamedLob, *fakeStreamer)
+		setup  func(*fakeStreamer)
+		invoke func(*streamedLob) (int64, error)
+		want   int64
+	}{
+		{
+			name: "BLOB cached size",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedBlob(t, rows, 7, nil)
+			},
+			invoke: func(value *streamedLob) (int64, error) { return value.Size() },
+			want:   7,
+		},
+		{
+			name: "CLOB server size",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedClob(t, rows, 1, nil)
+			},
+			setup:  func(streamer *fakeStreamer) { appendTestLobResponse(streamer, nil, 8, nil) },
+			invoke: func(value *streamedLob) (int64, error) { return value.Size() },
+			want:   8,
+		},
+		{
+			name: "CLOB chunk size",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedClob(t, rows, 1, nil)
+			},
+			setup:  func(streamer *fakeStreamer) { appendTestLobResponse(streamer, nil, 16, nil) },
+			invoke: func(value *streamedLob) (int64, error) { return value.ChunkSize() },
+			want:   16,
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			rows := newLobTestRows()
+			value, streamer := test.value(t, rows)
+			if test.setup != nil {
+				test.setup(streamer)
+			}
+			mustRegisterLob(t, rows, value)
+			got, err := test.invoke(value)
+			if err != nil || got != test.want {
+				t.Fatalf("metadata result = (%d, %v), want (%d, nil)", got, err, test.want)
+			}
+			_ = value.Close()
+		})
+	}
+}
+
+// TestStreamedLob_WriteToPropagatesWriterAndReadFailures verifies WriterTo
+// preserves bytes written and distinguishes short, writer, and read errors.
+func TestStreamedLob_WriteToPropagatesWriterAndReadFailures(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		value    func(*testing.T, *ttcRows) (*streamedLob, *fakeStreamer)
+		writer   io.Writer
+		readErr  bool
+		wantN    int64
+		checkErr func(*testing.T, error)
+	}{
+		{
+			name: "nil writer",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedBlob(t, rows, 1, nil)
+			},
+			checkErr: func(t *testing.T, err error) {
+				requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+			},
+		},
+		{
+			name: "writer error",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedBlob(t, rows, 3, []byte("abc"))
+			},
+			writer: streamedLobWriteFunc(func([]byte) (int, error) {
+				return 1, errors.New("destination failed")
+			}),
+			wantN: 1,
+			checkErr: func(t *testing.T, err error) {
+				if err == nil || !strings.Contains(err.Error(), "destination failed") {
+					t.Fatalf("WriterTo error = %v, want destination failure", err)
+				}
+			},
+		},
+		{
+			name: "short writer",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedBlob(t, rows, 3, []byte("abc"))
+			},
+			writer: streamedLobWriteFunc(func([]byte) (int, error) { return 1, nil }),
+			wantN:  1,
+			checkErr: func(t *testing.T, err error) {
+				if !errors.Is(err, io.ErrShortWrite) {
+					t.Fatalf("WriterTo error = %v, want io.ErrShortWrite", err)
+				}
+			},
+		},
+		{
+			name: "read error",
+			value: func(t *testing.T, rows *ttcRows) (*streamedLob, *fakeStreamer) {
+				return newTestStreamedBlob(t, rows, 1, nil)
+			},
+			writer:  io.Discard,
+			readErr: true,
+			checkErr: func(t *testing.T, err error) {
+				if err == nil {
+					t.Fatal("WriterTo unexpectedly succeeded after read failure")
+				}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			rows := newLobTestRows()
+			value, streamer := test.value(t, rows)
+			if test.readErr {
+				streamer.pullErr = errors.New("read failed")
+			}
+			if test.writer != nil {
+				mustRegisterLob(t, rows, value)
+			}
+			got, err := value.WriteTo(test.writer)
+			if got != test.wantN {
+				t.Fatalf("WriterTo bytes = %d, want %d", got, test.wantN)
+			}
+			test.checkErr(t, err)
+			_ = value.Close()
+		})
+	}
+}
+
+// TestStreamedLob_InvalidateAndLengthOverflow verifies explicit owner
+// invalidation and public int64 size conversion remain fail-closed.
+func TestStreamedLob_InvalidateAndLengthOverflow(t *testing.T) {
+	t.Parallel()
+
+	rows := newLobTestRows()
+	value, _ := newTestStreamedBlob(t, rows, 1, nil)
+	mustRegisterLob(t, rows, value)
+	value.invalidate()
+	if _, err := value.Read(make([]byte, 1)); err == nil {
+		t.Fatal("Read unexpectedly succeeded after explicit invalidation")
+	} else {
+		requireErrorCode(t, err, oracleErrors.LobValueInvalidated)
+	}
+	_ = value.Close()
+
+	if got, err := checkedLobLength(driverCommon.UB8(uint64(^uint64(0)>>1) + 1)); got != 0 || err == nil {
+		t.Fatalf("checkedLobLength overflow = (%d, %v), want InvalidLOBBuffer", got, err)
+	} else {
+		requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
 	}
 }
 

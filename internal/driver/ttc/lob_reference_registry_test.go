@@ -614,3 +614,179 @@ func TestLobReferenceRegistry_ReleaseReferenceAcceptsNil(t *testing.T) {
 		t.Fatalf("nil reference release returned error: %v", err)
 	}
 }
+
+// TestLobReferenceRegistry_ExtractRejectsIneligibleLocators verifies that only
+// initialized temporary or abstract locators enter the reference registry.
+func TestLobReferenceRegistry_ExtractRejectsIneligibleLocators(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		locator  func() *locator
+		wantCode oracleErrors.ErrorCode
+	}{
+		{
+			name: "nil locator",
+			locator: func() *locator {
+				return nil
+			},
+			wantCode: oracleErrors.InvalidLOBBuffer,
+		},
+		{
+			name: "short locator",
+			locator: func() *locator {
+				return newLocator(make(common.B1Array, kolbLobIDOffset), 1)
+			},
+			wantCode: oracleErrors.InvalidLOBBuffer,
+		},
+		{
+			name: "quasi locator",
+			locator: func() *locator {
+				loc := newTestLobReferenceLocator(131)
+				loc.locatorBytes[kolbVersionOffset+1] = quasiLocatorVersion
+				return loc
+			},
+			wantCode: oracleErrors.InvalidLOBBuffer,
+		},
+		{
+			name: "value based locator",
+			locator: func() *locator {
+				loc := newTestLobReferenceLocator(132)
+				loc.locatorBytes[koll1FlagOffset] |= kolblValueBasedLocatorFlag
+				return loc
+			},
+			wantCode: oracleErrors.InvalidLOBBuffer,
+		},
+		{
+			name: "uninitialized locator",
+			locator: func() *locator {
+				loc := newTestLobReferenceLocator(133)
+				loc.locatorBytes[koll2FlagOffset] &^= kolblInitializedFlag
+				return loc
+			},
+			wantCode: oracleErrors.InvalidLOBBuffer,
+		},
+		{
+			name: "persistent locator",
+			locator: func() *locator {
+				loc := newTestLobReferenceLocator(134)
+				loc.locatorBytes[koll4FlagOffset] &^= kolblTemporaryFlagByte
+				return loc
+			},
+			wantCode: oracleErrors.InvalidLOBBuffer,
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := extractLobReferenceID(test.locator()); err == nil {
+				t.Fatal("extractLobReferenceID unexpectedly succeeded")
+			} else {
+				requireErrorCode(t, err, test.wantCode)
+			}
+		})
+	}
+}
+
+// TestLobReferenceRegistry_ExtractAcceptsAbstractLocator verifies that an
+// initialized abstract locator has a stable registry identity.
+func TestLobReferenceRegistry_ExtractAcceptsAbstractLocator(t *testing.T) {
+	t.Parallel()
+
+	loc := newTestLobReferenceLocator(135)
+	loc.locatorBytes[koll4FlagOffset] &^= kolblTemporaryFlagByte
+	loc.locatorBytes[koll1FlagOffset] |= kolblAbstractLocatorFlag
+
+	id, err := extractLobReferenceID(loc)
+	if err != nil {
+		t.Fatalf("extractLobReferenceID returned error: %v", err)
+	}
+	want := lobReferenceID(loc.locatorBytes[kolbLobIDOffset : kolbLobIDOffset+kolbLobIDLength])
+	if id != want {
+		t.Fatalf("LOB ID = %v, want %v", id, want)
+	}
+}
+
+// TestLobReferenceRegistry_ReleaseReportsOwnershipErrors verifies nil,
+// mismatched, and underflowed leases are handled without corrupting state.
+func TestLobReferenceRegistry_ReleaseReportsOwnershipErrors(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		setup    func(*lobReferenceRegistry) *lobReferenceLease
+		wantCode oracleErrors.ErrorCode
+	}{
+		{
+			name: "lease without registry",
+			setup: func(*lobReferenceRegistry) *lobReferenceLease {
+				return &lobReferenceLease{}
+			},
+		},
+		{
+			name: "different registry",
+			setup: func(*lobReferenceRegistry) *lobReferenceLease {
+				return &lobReferenceLease{registry: newLobReferenceRegistry()}
+			},
+			wantCode: oracleErrors.InternalError,
+		},
+		{
+			name: "reference count underflow",
+			setup: func(registry *lobReferenceRegistry) *lobReferenceLease {
+				return &lobReferenceLease{registry: registry, id: lobReferenceID{1}}
+			},
+			wantCode: oracleErrors.InternalError,
+		},
+	}
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			registry := newLobReferenceRegistry()
+			if err := registry.release(test.setup(registry)); test.wantCode == "" {
+				if err != nil {
+					t.Fatalf("release returned error: %v", err)
+				}
+			} else if err == nil {
+				t.Fatal("release unexpectedly succeeded")
+			} else {
+				requireErrorCode(t, err, test.wantCode)
+			}
+		})
+	}
+}
+
+// TestLobReferenceRegistry_ReserveSkipsUnavailableEntries verifies that a
+// pending batch contains only entries eligible for immediate cleanup.
+func TestLobReferenceRegistry_ReserveSkipsUnavailableEntries(t *testing.T) {
+	t.Parallel()
+
+	registry := newLobReferenceRegistry()
+	eligible := newTestLobReferenceLocator(136)
+	registry.entries[lobReferenceID(eligible.locatorBytes[kolbLobIDOffset:kolbLobIDOffset+kolbLobIDLength])] = &lobReferenceEntry{
+		locator: append(common.B1Array(nil), eligible.locatorBytes...),
+		pending: true,
+	}
+	registry.entries[lobReferenceID{2}] = &lobReferenceEntry{
+		locator:    common.B1Array("not-pending"),
+		references: 1,
+	}
+	registry.entries[lobReferenceID{3}] = &lobReferenceEntry{
+		locator: common.B1Array("already-queued"),
+		pending: true,
+		queued:  true,
+	}
+
+	batch, err := registry.reservePending()
+	if err != nil {
+		t.Fatalf("reservePending returned error: %v", err)
+	}
+	if batch == nil || len(batch.ids) != 1 || len(batch.locators) != len(eligible.locatorBytes) {
+		t.Fatalf("reserved batch = %+v, want one eligible locator", batch)
+	}
+	registry.completePending(nil)
+	registry.restorePending(nil)
+	registry.completePending(batch)
+	if len(registry.entries) != 2 {
+		t.Fatalf("registry entries after completing batch = %d, want 2 skipped entries", len(registry.entries))
+	}
+}

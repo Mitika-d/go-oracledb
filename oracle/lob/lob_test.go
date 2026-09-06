@@ -345,3 +345,63 @@ func TestLOB_DelegatesSourceErrors(t *testing.T) {
 		})
 	}
 }
+
+// TestLOB_ClosePropagatesSourceError verifies Close returns a source cleanup
+// error while keeping the LOB terminal and preventing a second close attempt.
+func TestLOB_ClosePropagatesSourceError(t *testing.T) {
+	t.Parallel()
+
+	closeErr := errors.New("source close failed")
+	source := &testSource{kind: BLOB, closeErr: closeErr}
+	var value LOB
+	if err := value.Scan(source); err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if err := value.Close(); !errors.Is(err, closeErr) {
+		t.Fatalf("Close error = %v, want %v", err, closeErr)
+	}
+	if err := value.Close(); err != nil {
+		t.Fatalf("second Close returned error: %v", err)
+	}
+	if source.closeCalls != 1 {
+		t.Fatalf("Close calls = %d, want 1", source.closeCalls)
+	}
+
+	// A zero-value LOB has no source, so Close must still complete successfully.
+	var empty LOB
+	if err := empty.Close(); err != nil {
+		t.Fatalf("Close on zero-value LOB returned error: %v", err)
+	}
+}
+
+// TestLOB_ScanAcceptsNonPointerSource verifies Scan accepts a non-pointer
+// source, covering the non-pointer reflection path in isNilSource.
+func TestLOB_ScanAcceptsNonPointerSource(t *testing.T) {
+	t.Parallel()
+
+	// A nil interface is handled before reflection and must be recognized as nil.
+	if !isNilSource(nil) {
+		t.Fatal("isNilSource(nil) = false, want true")
+	}
+
+	var value LOB
+	if err := value.Scan(valueLOBSource{kind: BLOB}); err != nil {
+		t.Fatalf("Scan returned error: %v", err)
+	}
+	if !value.Valid() || value.Kind() != BLOB {
+		t.Fatalf("LOB state = valid:%t kind:%d, want valid BLOB", value.Valid(), value.Kind())
+	}
+}
+
+// valueLOBSource is a value-typed LOB source used to exercise reflection of a
+// non-pointer implementation in LOB.Scan.
+type valueLOBSource struct {
+	kind Kind
+}
+
+func (source valueLOBSource) Read([]byte) (int, error)         { return 0, io.EOF }
+func (source valueLOBSource) WriteTo(io.Writer) (int64, error) { return 0, nil }
+func (valueLOBSource) Close() error                            { return nil }
+func (valueLOBSource) Size() (int64, error)                    { return 0, nil }
+func (valueLOBSource) ChunkSize() (int64, error)               { return 0, nil }
+func (source valueLOBSource) Kind() Kind                       { return source.kind }
