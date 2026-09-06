@@ -44,8 +44,6 @@ package lob
 import "io"
 
 const (
-	DefaultLobPrefetchSize = 32 * 1024 * 1024
-
 	// BLOB reads and ordinary streamed BLOB bind writes.
 	DefaultBlobLobChunkBytes = 32 * 1024
 

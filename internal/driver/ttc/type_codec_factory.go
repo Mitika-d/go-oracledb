@@ -47,6 +47,7 @@ import (
 	"github.com/oracle/go-oracledb/v26/internal/common"
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
 	"github.com/oracle/go-oracledb/v26/internal/driver/ttc/converters"
+	oracleconfig "github.com/oracle/go-oracledb/v26/oracle/config"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
 
@@ -620,7 +621,9 @@ func (f *CodecFactoryImpl) getDefineOac(
 
 	candidates := f.defineOacs.getCandidates(dbType)
 	bestCandidate := getEntryFromRegistry(f.ttcVersion, candidates)
-	var lobPrefetchSize driverCommon.UB4
+	// A nil properties value is possible in unit-level callers and should use
+	// the same default as a normally constructed driver configuration.
+	lobPrefetchSize := driverCommon.UB4(oracleconfig.DefaultLobPrefetchSize)
 	if connectionProperties != nil {
 		lobPrefetchSize = driverCommon.UB4(connectionProperties.GetDefaultLobPrefetchSize())
 	}

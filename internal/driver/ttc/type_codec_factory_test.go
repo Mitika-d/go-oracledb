@@ -533,7 +533,8 @@ func TestCodecFactory_GetDefineOacUsesConnectionLobPrefetch(t *testing.T) {
 		ttcVersion: MinTTCProtocolVersion,
 		defineOacs: defineReg,
 	}
-	properties := &oracleconfig.OracleDriverProperties{DefaultLobPrefetchSize: 32 * 1024 * 1024}
+	const configuredPrefetchSize = 12345
+	properties := &oracleconfig.OracleDriverProperties{DefaultLobPrefetchSize: configuredPrefetchSize}
 	column := columnContext{DataType: DtyBlob}
 
 	define := factory.getDefineOac(
@@ -543,6 +544,27 @@ func TestCodecFactory_GetDefineOacUsesConnectionLobPrefetch(t *testing.T) {
 	).(*tTIoac)
 	if got, want := define.codepointLengthLimit, common.UB4(properties.DefaultLobPrefetchSize); got != want {
 		t.Fatalf("prefetch = %d, want connection default %d", got, want)
+	}
+}
+
+// TestCodecFactory_GetDefineOacUsesDefaultLobPrefetchWithoutProperties
+// verifies that LOB define metadata uses the package default when connection
+// properties are unavailable.
+func TestCodecFactory_GetDefineOacUsesDefaultLobPrefetchWithoutProperties(t *testing.T) {
+	t.Parallel()
+
+	defineReg := newCodecRegistry[DtyType, defineOacFunc]()
+	if err := defineReg.Register(DtyBlob, MinTTCProtocolVersion, newTTIOacBlobDefine); err != nil {
+		t.Fatalf("Register returned error: %v", err)
+	}
+	factory := &CodecFactoryImpl{
+		ttcVersion: MinTTCProtocolVersion,
+		defineOacs: defineReg,
+	}
+
+	define := factory.getDefineOac(DtyBlob, columnContext{DataType: DtyBlob}, nil).(*tTIoac)
+	if got, want := define.codepointLengthLimit, common.UB4(oracleconfig.DefaultLobPrefetchSize); got != want {
+		t.Fatalf("prefetch = %d, want default %d", got, want)
 	}
 }
 

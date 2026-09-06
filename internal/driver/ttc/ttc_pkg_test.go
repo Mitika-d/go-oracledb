@@ -662,6 +662,7 @@ var testCases = []struct {
 	{"TestCodecFactory_getBindOac", "unitary", false, TestCodecFactory_getBindOac},
 	{"TestCodecFactory_getDefineOac", "unitary", false, TestCodecFactory_getDefineOac},
 	{"TestCodecFactory_GetDefineOacUsesConnectionLobPrefetch", "unitary", false, TestCodecFactory_GetDefineOacUsesConnectionLobPrefetch},
+	{"TestCodecFactory_GetDefineOacUsesDefaultLobPrefetchWithoutProperties", "unitary", false, TestCodecFactory_GetDefineOacUsesDefaultLobPrefetchWithoutProperties},
 	{"TestConnectionResetter_Reset", "unitary", false, TestConnectionResetter_Reset},
 	{"TestConnection_ExecContext_LocalizesError", "unitary", false, TestConnection_ExecContext_LocalizesError},
 	{"TestConnection_LocalizationStaysBoundToEachShelf", "unitary", false, TestConnection_LocalizationStaysBoundToEachShelf},
