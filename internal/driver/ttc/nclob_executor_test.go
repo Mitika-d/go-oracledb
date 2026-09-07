@@ -75,7 +75,7 @@ func TestClobExecutor_ReadNCLOB(t *testing.T) {
 	wantMarshal, shelf, dbuf, marshalWritePosition := setUpReadScenario(t, nclobReadMarshalGoldenPayload, nclobReadResponseGoldenPayload, 131072)
 
 	lobExec := newClobExecutor(shelf, newTestSessionContext())
-	payload, logical, err := lobExec.read(ctx, newLocator(nclobReadLocator, nclobReadOffset), nclobReadNumChars, nclobReadIsNCLOB)
+	payload, logical, err := lobExec.read(ctx, newLocator(nclobReadLocator, nclobReadOffset), nclobReadNumChars, nclobReadIsNCLOB, 0)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}

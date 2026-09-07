@@ -273,7 +273,7 @@ func TestClobExecutor_Read(t *testing.T) {
 	wantMarshal, shelf, dbuf, marshalWritePosition := setUpReadScenario(t, clobReadMarshalGoldenPayload, clobReadResponseGoldenPayload, 131072)
 
 	lobExec := newClobExecutor(shelf, newTestSessionContext())
-	payload, logical, err := lobExec.read(ctx, newLocator(clobReadLocator, clobReadOffset), clobReadNumChars, clobReadIsNCLOB)
+	payload, logical, err := lobExec.read(ctx, newLocator(clobReadLocator, clobReadOffset), clobReadNumChars, clobReadIsNCLOB, 0)
 	if err != nil {
 		t.Fatalf("Read failed: %v", err)
 	}
@@ -315,7 +315,7 @@ func TestClobExecutor_ReadRejectsResponseBeyondRequest(t *testing.T) {
 	shelf.RegisterMessageStreamer(streamer)
 
 	executor := newClobExecutor(shelf, newTestSessionContext())
-	_, _, err := executor.read(context.Background(), newLocator(newTestLocator(false), 1), 1, false)
+	_, _, err := executor.read(context.Background(), newLocator(newTestLocator(false), 1), 1, false, 0)
 	requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
 }
 
@@ -327,14 +327,53 @@ func TestClobExecutor_DecodeReadPayloadRejectsIncompleteCharacter(t *testing.T) 
 	executor := newClobExecutor(newShelf[driverCommon.MessageType]().Shelf, newTestSessionContext())
 	loc := newLocator(make(driverCommon.B1Array, koll4FlagOffset+1), 1)
 
-	_, _, err := executor.decodeReadPayload(loc, false, []byte{0xF0, 0x9F, 0x99})
+	_, _, _, err := executor.decodeReadPayload(loc, false, []byte{0xF0, 0x9F, 0x99}, 0, false)
 	requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
 
-	_, _, err = executor.decodeReadPayload(loc, true, []byte{0xD8, 0x3D})
+	_, _, _, err = executor.decodeReadPayload(loc, true, []byte{0xD8, 0x3D}, 0, false)
 	requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
 
-	if payload, logical, err := executor.decodeReadPayload(loc, false, nil); err != nil || payload != nil || logical != 0 {
+	if payload, logical, _, err := executor.decodeReadPayload(loc, false, nil, 0, false); err != nil || payload != nil || logical != 0 {
 		t.Fatalf("empty decodeReadPayload = (%q, %d, %v), want (nil, 0, nil)", payload, logical, err)
+	}
+}
+
+// TestClobExecutor_DecodeReadPayloadJoinsPrefetchSurrogate verifies that a
+// high surrogate at the end of an inline CLOB prefix is joined with the low
+// surrogate returned by the first locator read.
+func TestClobExecutor_DecodeReadPayloadJoinsPrefetchSurrogate(t *testing.T) {
+	t.Parallel()
+
+	executor := newClobExecutor(newShelf[driverCommon.MessageType]().Shelf, newTestSessionContext())
+	loc := newLocator(newTestLocator(true), 1)
+	highSurrogate := uint16(0xD83D)
+
+	prefix, prefixUnits, carry, err := executor.decodeReadPayload(
+		loc,
+		false,
+		[]byte{0xD8, 0x3D},
+		0,
+		true,
+	)
+	if err != nil {
+		t.Fatalf("decodeReadPayload for prefix returned error: %v", err)
+	}
+	if len(prefix) != 0 || prefixUnits != 1 || carry != highSurrogate {
+		t.Fatalf("prefix result = (%q, %d, %#04x), want (empty, 1, %#04x)", prefix, prefixUnits, carry, highSurrogate)
+	}
+
+	decoded, locatorUnits, nextCarry, err := executor.decodeReadPayload(
+		loc,
+		false,
+		[]byte{0xDE, 0x42},
+		carry,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("decode locator remainder returned error: %v", err)
+	}
+	if string(decoded) != "🙂" || locatorUnits != 1 || nextCarry != 0 {
+		t.Fatalf("locator result = (%q, %d, %#04x), want (🙂, 1, 0)", decoded, locatorUnits, nextCarry)
 	}
 }
 
@@ -519,7 +558,7 @@ func TestClobExecutor_ReadRejectsLogicalAmountMismatch(t *testing.T) {
 	})
 	setup.stub.lobdPayloads = [][]byte{[]byte("a")}
 	setup.stub.lobRpaAmounts = []driverCommon.UB8{2}
-	_, _, err := setup.clob.read(context.Background(), newLocator(newTestLocator(false), 1), 2, false)
+	_, _, err := setup.clob.read(context.Background(), newLocator(newTestLocator(false), 1), 2, false, 0)
 	if err == nil {
 		t.Fatal("read unexpectedly accepted a mismatched logical amount")
 	}
@@ -709,7 +748,7 @@ func TestClobExecutor_ReadErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			exec, locator, offset, numChars, isNCLOB, _, _ := tc.setup()
-			_, _, err := exec.read(ctx, newLocator(locator, offset), numChars, isNCLOB)
+			_, _, err := exec.read(ctx, newLocator(locator, offset), numChars, isNCLOB, 0)
 			if err == nil {
 				t.Fatalf("expected error")
 			}

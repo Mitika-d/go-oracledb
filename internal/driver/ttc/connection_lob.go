@@ -103,7 +103,7 @@ func (c *connection) LobRead(ctx context.Context, kind uint8, bytes []byte, offs
 	var logical driverCommon.UB8
 	err = c._executeLobOperation(ctx, func(ctx context.Context, manager *lobManager) error {
 		var err error
-		data, logical, err = manager.read(ctx, internallob.Kind(kind), loc, driverCommon.UB8(amount))
+		data, logical, err = manager.read(ctx, internallob.Kind(kind), loc, driverCommon.UB8(amount), 0)
 		return err
 	})
 	return data, uint64(logical), err

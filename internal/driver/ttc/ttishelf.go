@@ -75,7 +75,7 @@ type ttiShelf[T any] struct {
 	*driverCommon.Shelf[T]
 	// codecFactory selects codecs and OAC builders for the negotiated protocol.
 	codecFactory      codecFactory
-	_providerRegistry internalCommon.ProviderRegistry
+	_providerRegistry internalCommon.Registry[providers.Provider]
 	// _statements tracks open statements weakly for connection shutdown.
 	_statements map[*Statement]weak.Pointer[Statement]
 	// _currentTransaction is non-nil while one transaction owns the session.

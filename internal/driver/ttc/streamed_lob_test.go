@@ -850,7 +850,7 @@ func TestStreamedLob_ClobPrefixConversionUsesCorrectLogicalUnits(t *testing.T) {
 	executor := newClobExecutor(newShelf[driverCommon.MessageType]().Shelf, session)
 	loc := newLocator(make(driverCommon.B1Array, koll4FlagOffset+1), 1)
 
-	payload, logical, err := executor.decodeReadPayload(loc, false, []byte("A🙂"))
+	payload, logical, _, err := executor.decodeReadPayload(loc, false, []byte("A🙂"), 0, false)
 	if err != nil {
 		t.Fatalf("CLOB decodePrefix returned error: %v", err)
 	}
@@ -858,12 +858,46 @@ func TestStreamedLob_ClobPrefixConversionUsesCorrectLogicalUnits(t *testing.T) {
 		t.Fatalf("CLOB prefix = (%q, %d), want (A🙂, 3 UTF-16 units)", payload, logical)
 	}
 
-	payload, logical, err = executor.decodeReadPayload(loc, true, []byte{0xD8, 0x3D, 0xDE, 0x42})
+	payload, logical, _, err = executor.decodeReadPayload(loc, true, []byte{0xD8, 0x3D, 0xDE, 0x42}, 0, false)
 	if err != nil {
 		t.Fatalf("NCLOB decodePrefix returned error: %v", err)
 	}
 	if !bytes.Equal(payload, []byte("🙂")) || logical != 2 {
 		t.Fatalf("NCLOB prefix = (%q, %d), want (🙂, 2 UTF-16 units)", payload, logical)
+	}
+}
+
+// TestStreamedLob_JoinsSurrogateAcrossPrefetchBoundary reproduces the JDBC
+// behavior where a prefetched high surrogate is followed by its low surrogate
+// in the first locator response.
+func TestStreamedLob_JoinsSurrogateAcrossPrefetchBoundary(t *testing.T) {
+	t.Parallel()
+
+	rows := newLobTestRows()
+	rows.sessionContext = driverCommon.NewSessionContext()
+	rows.sessionContext.SetSessionCharacterSets(al32Utf8CharSet, al16Utf16CharSet)
+	_, streamer := newTestStreamedLobManager(t, rows)
+
+	value, err := newStreamedLob(rows, DtyClob, []byte{0xD8, 0x3D}, lobColumnContext{
+		charsetForm:    FormChar,
+		totalLobLength: 2,
+		lobLocator:     newTestLocator(true),
+	})
+	if err != nil {
+		t.Fatalf("newStreamedLob returned error: %v", err)
+	}
+	appendTestLobResponse(streamer, []byte{0xDE, 0x42}, 1, nil)
+	mustRegisterLob(t, rows, value)
+
+	got, err := io.ReadAll(value)
+	if err != nil {
+		t.Fatalf("ReadAll returned error: %v", err)
+	}
+	if string(got) != "🙂" {
+		t.Fatalf("ReadAll = %q, want 🙂", got)
+	}
+	if value.pendingHighSurrogate != 0 {
+		t.Fatal("surrogate carry remained after locator read")
 	}
 }
 

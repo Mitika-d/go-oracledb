@@ -171,19 +171,36 @@ func (m *lobManager) freeLobReference(loc *locator) error {
 //   - kind: BLOB, CLOB, or NCLOB family of loc.
 //   - loc: locator to read without changing its caller-owned offset.
 //   - amount: maximum Oracle logical units to request.
+//   - prefixHighSurrogate: high surrogate carried from a prefetched text
+//     prefix, or zero when the read starts on a character boundary.
 //
 // Returns:
 //   - []byte: read BLOB bytes or UTF-8 character-LOB bytes.
 //   - driverCommon.UB8: logical units consumed by the read.
 //   - error: validation, read-RPC, or locator-kind error.
-func (m *lobManager) read(ctx context.Context, kind internallob.Kind, loc *locator, amount driverCommon.UB8) ([]byte, driverCommon.UB8, error) {
+func (m *lobManager) read(
+	ctx context.Context,
+	kind internallob.Kind,
+	loc *locator,
+	amount driverCommon.UB8,
+	prefixHighSurrogate uint16,
+) ([]byte, driverCommon.UB8, error) {
 	switch kind {
 	case internallob.BLOB:
+		if prefixHighSurrogate != 0 {
+			return nil, 0, common.NewOracleError(
+				oracleErrors.InvalidLOBBuffer,
+				nil,
+				"read",
+				"blob",
+				"UTF-16 carry on BLOB",
+			)
+		}
 		return m.getBlobExecutor().read(ctx, loc, amount)
 	case internallob.CLOB:
-		return m.getClobExecutor().read(ctx, loc, amount, false)
+		return m.getClobExecutor().read(ctx, loc, amount, false, prefixHighSurrogate)
 	case internallob.NCLOB:
-		return m.getClobExecutor().read(ctx, loc, amount, true)
+		return m.getClobExecutor().read(ctx, loc, amount, true, prefixHighSurrogate)
 	default:
 		return nil, 0, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB kind")
 	}

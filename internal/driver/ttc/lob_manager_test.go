@@ -112,7 +112,7 @@ func TestLobManager_RejectsUnsupportedKind(t *testing.T) {
 		call func() error
 	}{
 		{name: "createTemporary", call: func() error { _, err := manager.createTemporary(ctx, unsupported); return err }},
-		{name: "read", call: func() error { _, _, err := manager.read(ctx, unsupported, loc, 1); return err }},
+		{name: "read", call: func() error { _, _, err := manager.read(ctx, unsupported, loc, 1, 0); return err }},
 		{name: "write", call: func() error { _, err := manager.write(ctx, unsupported, loc, nil); return err }},
 		{name: "length", call: func() error { _, err := manager.length(ctx, unsupported, loc); return err }},
 		{name: "chunkSize", call: func() error { _, err := manager.chunkSize(ctx, unsupported, loc); return err }},
@@ -212,7 +212,7 @@ func TestLobManager_SharedExecutorExchangesAreAdmissionSerialized(t *testing.T) 
 			return
 		}
 		close(firstStarted)
-		_, _, readErr := firstManager.read(context.Background(), internallob.BLOB, newLocator(newTestLocator(false), 1), 1)
+		_, _, readErr := firstManager.read(context.Background(), internallob.BLOB, newLocator(newTestLocator(false), 1), 1, 0)
 		release()
 		firstDone <- readErr
 	}()
@@ -232,7 +232,7 @@ func TestLobManager_SharedExecutorExchangesAreAdmissionSerialized(t *testing.T) 
 			return
 		}
 		close(secondAdmitted)
-		_, _, readErr := secondManager.read(context.Background(), internallob.BLOB, newLocator(newTestLocator(false), 1), 1)
+		_, _, readErr := secondManager.read(context.Background(), internallob.BLOB, newLocator(newTestLocator(false), 1), 1, 0)
 		release()
 		secondDone <- readErr
 	}()
@@ -303,7 +303,7 @@ func TestLobManager_DispatchesAllLOBOperations(t *testing.T) {
 			return err
 		}},
 		{name: "read", want: kplobRead, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {
-			_, _, err := manager.read(ctx, kind, loc, 1)
+			_, _, err := manager.read(ctx, kind, loc, 1, 0)
 			return err
 		}},
 		{name: "write", want: kplobWrite, call: func(ctx context.Context, manager *lobManager, kind internallob.Kind, loc *locator) error {

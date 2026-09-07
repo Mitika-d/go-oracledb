@@ -428,8 +428,10 @@ func (c *clobExecutor) write(
 }
 
 // read fetches one complete TTC CLOB or NCLOB locator response and converts it
-// to UTF-8. Oracle locator reads are character-boundary aligned, so no
-// cross-read byte or surrogate carry is required.
+// to UTF-8. Ordinary locator reads are character-boundary aligned. A streamed
+// query LOB may, however, have a high UTF-16 surrogate in its prefetched RXD
+// prefix, with the matching low surrogate arriving in the first locator read;
+// prefixHighSurrogate carries that state into this same read method.
 //
 //	CLOB read:
 //	  #1 When the database character set is fixed width, LOB data is sent in the network character
@@ -448,6 +450,8 @@ func (c *clobExecutor) write(
 //   - locator: source locator to read from.
 //   - numUnits: maximum Oracle UCS-2/UTF-16 units to read.
 //   - isNCLOB: indicates whether the locator represents an NCLOB.
+//   - prefixHighSurrogate: high surrogate already consumed from a prefetched
+//     prefix, or zero when no carry is pending.
 //
 // Returns:
 //   - []byte: UTF-8 payload decoded from the locator response.
@@ -463,6 +467,7 @@ func (c *clobExecutor) read(
 	lobLocator *locator,
 	numUnits driverCommon.UB8,
 	isNCLOB bool,
+	prefixHighSurrogate uint16,
 ) ([]byte, driverCommon.UB8, error) {
 	numUnits = boundedClobReadAmount(numUnits)
 	// now see if variable length character set.
@@ -501,7 +506,13 @@ func (c *clobExecutor) read(
 		)}
 	}
 
-	payload, derivedUnits, err := c.decodeReadPayload(lobLocator, isNCLOB, binaryReadBuffer[:bytesTransferred])
+	payload, derivedUnits, _, err := c.decodeReadPayload(
+		lobLocator,
+		isNCLOB,
+		binaryReadBuffer[:bytesTransferred],
+		prefixHighSurrogate,
+		false,
+	)
 	if err != nil {
 		common.Odl.Error("clobExecutor.read: decodeLobCharPayload failed",
 			"error", err,
@@ -536,16 +547,29 @@ func (c *clobExecutor) read(
 	return payload, serverUnits, nil
 }
 
-// decodeReadPayload converts a complete TTC CLOB/NCLOB payload to UTF-8 and
-// reports its Oracle UTF-16 logical-unit count. It is used for both TTILOBD
-// locator responses and inline RXD prefixes.
-func (c *clobExecutor) decodeReadPayload(lobLocator *locator, isNCLOB bool, payload []byte) ([]byte, driverCommon.UB8, error) {
+// decodeReadPayload converts a TTC CLOB/NCLOB payload to UTF-8 and reports its
+// Oracle UTF-16 logical-unit count. When allowTrailingHighSurrogate is true,
+// the payload is an inline RXD prefix and a trailing high surrogate is returned
+// as carry for the next locator read. Otherwise the payload must be complete.
+func (c *clobExecutor) decodeReadPayload(
+	lobLocator *locator,
+	isNCLOB bool,
+	payload []byte,
+	prefixHighSurrogate uint16,
+	allowTrailingHighSurrogate bool,
+) ([]byte, driverCommon.UB8, uint16, error) {
 	if len(payload) == 0 {
-		return nil, 0, nil
+		if prefixHighSurrogate != 0 {
+			return nil, 0, 0, invalidUTF16SurrogateError()
+		}
+		return nil, 0, 0, nil
 	}
 	variableWidth := lobLocator.isLobCharsetVariableWidth()
+	if prefixHighSurrogate != 0 && !variableWidth && !isNCLOB {
+		return nil, 0, 0, invalidUTF16SurrogateError()
+	}
 	if !variableWidth && !isNCLOB && !utf8.Valid(payload) {
-		return nil, 0, common.NewOracleError(
+		return nil, 0, 0, common.NewOracleError(
 			oracleErrors.InvalidLOBBuffer,
 			nil,
 			"read",
@@ -554,17 +578,74 @@ func (c *clobExecutor) decodeReadPayload(lobLocator *locator, isNCLOB bool, payl
 		)
 	}
 	if variableWidth || isNCLOB {
-		if err := validateCompleteUTF16Payload(payload, lobLocator.isLobCharsetLittleEndian()); err != nil {
-			return nil, 0, err
-		}
+		return decodeUTF16Payload(
+			payload,
+			lobLocator.isLobCharsetLittleEndian(),
+			prefixHighSurrogate,
+			allowTrailingHighSurrogate,
+		)
 	}
 	runes := make([]rune, len(payload))
 	decoded, err := c.decodeLobCharPayload(payload, runes, 0, variableWidth, isNCLOB, lobLocator.isLobCharsetLittleEndian())
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, 0, err
 	}
 	runes = runes[:decoded]
-	return []byte(string(runes)), driverCommon.UB8(lobCharacterUnits(runes)), nil
+	return []byte(string(runes)), driverCommon.UB8(lobCharacterUnits(runes)), 0, nil
+}
+
+// decodeUTF16Payload decodes a UTF-16 payload while optionally joining a high
+// surrogate retained from an earlier payload. logical is deliberately based
+// only on units in payload, because a carried prefix unit was already counted
+// by the caller's LOB offset.
+func decodeUTF16Payload(
+	payload []byte,
+	littleEndian bool,
+	prefixHighSurrogate uint16,
+	allowTrailingHighSurrogate bool,
+) ([]byte, driverCommon.UB8, uint16, error) {
+	units, err := readUTF16CodeUnits(payload, littleEndian)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	logical := driverCommon.UB8(len(units))
+	if prefixHighSurrogate != 0 {
+		if !isUTF16HighSurrogate(prefixHighSurrogate) || len(units) == 0 || !isUTF16LowSurrogate(units[0]) {
+			return nil, 0, 0, invalidUTF16SurrogateError()
+		}
+		joined := make([]uint16, 0, len(units)+1)
+		joined = append(joined, prefixHighSurrogate)
+		joined = append(joined, units...)
+		units = joined
+	}
+
+	var nextHighSurrogate uint16
+	if allowTrailingHighSurrogate && len(units) > 0 && isUTF16HighSurrogate(units[len(units)-1]) {
+		nextHighSurrogate = units[len(units)-1]
+		units = units[:len(units)-1]
+	}
+	if err := validateCompleteUTF16Units(units); err != nil {
+		return nil, 0, 0, err
+	}
+	return []byte(string(utf16.Decode(units))), logical, nextHighSurrogate, nil
+}
+
+func invalidUTF16SurrogateError() error {
+	return common.NewOracleError(
+		oracleErrors.InvalidLOBBuffer,
+		nil,
+		"read",
+		"clob",
+		"invalid UTF-16 surrogate pair",
+	)
+}
+
+func isUTF16HighSurrogate(unit uint16) bool {
+	return unit >= 0xD800 && unit <= 0xDBFF
+}
+
+func isUTF16LowSurrogate(unit uint16) bool {
+	return unit >= 0xDC00 && unit <= 0xDFFF
 }
 
 // validateCompleteUTF16Payload rejects a partial code unit or surrogate pair
@@ -574,22 +655,20 @@ func validateCompleteUTF16Payload(payload []byte, littleEndian bool) error {
 	if err != nil {
 		return err
 	}
+	return validateCompleteUTF16Units(units)
+}
+
+func validateCompleteUTF16Units(units []uint16) error {
 	for index := 0; index < len(units); index++ {
 		unit := units[index]
 		switch {
-		case unit >= 0xD800 && unit <= 0xDBFF:
-			if index+1 >= len(units) || units[index+1] < 0xDC00 || units[index+1] > 0xDFFF {
-				return common.NewOracleError(
-					oracleErrors.InvalidLOBBuffer,
-					nil,
-					"read",
-					"clob",
-					"invalid UTF-16 surrogate pair",
-				)
+		case isUTF16HighSurrogate(unit):
+			if index+1 >= len(units) || !isUTF16LowSurrogate(units[index+1]) {
+				return invalidUTF16SurrogateError()
 			}
 			index++
-		case unit >= 0xDC00 && unit <= 0xDFFF:
-			return common.NewOracleError(oracleErrors.InvalidLOBBuffer, nil, "read", "clob", "unpaired UTF-16 low surrogate")
+		case isUTF16LowSurrogate(unit):
+			return invalidUTF16SurrogateError()
 		}
 	}
 	return nil

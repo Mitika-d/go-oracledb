@@ -92,6 +92,10 @@ type streamedLob struct {
 	// pending contains one converted bounded refill that was larger than the
 	// caller's destination. It is consumed before another TTC refill.
 	pending []byte
+	// pendingHighSurrogate is a UTF-16 high surrogate retained when an inline
+	// CLOB/NCLOB prefix ends halfway through a supplementary character. It is
+	// joined with the first low surrogate returned by the locator read.
+	pendingHighSurrogate uint16
 	// nextOffset is the next 1-based Oracle byte or UTF-16-unit position.
 	nextOffset driverCommon.UB8
 	// readStarted prevents promotion after any data has been returned to the
@@ -173,10 +177,12 @@ func newStreamedLob(owner *ttcRows, dtype DtyType, prefix driverCommon.B1Array, 
 			lob.kind = internallob.NCLOB
 		}
 		clobExecutor := manager.getClobExecutor()
-		decodedPrefix, logical, err := clobExecutor.decodeReadPayload(
+		decodedPrefix, logical, pendingHighSurrogate, err := clobExecutor.decodeReadPayload(
 			loc,
 			lob.kind == internallob.NCLOB,
 			prefix,
+			0,
+			true,
 		)
 		if err != nil {
 			return nil, err
@@ -184,7 +190,17 @@ func newStreamedLob(owner *ttcRows, dtype DtyType, prefix driverCommon.B1Array, 
 		if err := validateStreamedLobPrefix(logical, lob.totalLength); err != nil {
 			return nil, err
 		}
+		if pendingHighSurrogate != 0 && logical >= lob.totalLength {
+			return nil, common.NewOracleError(
+				oracleErrors.InvalidLOBBuffer,
+				nil,
+				"decode",
+				"clob",
+				"invalid UTF-16 surrogate pair",
+			)
+		}
 		lob.prefix = decodedPrefix
+		lob.pendingHighSurrogate = pendingHighSurrogate
 		lob.nextOffset += logical
 	default:
 		return nil, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "TTC datatype")
@@ -228,6 +244,7 @@ func (lob *streamedLob) DetachPersistentLocator(sessionKey any) ([]byte, error) 
 	lob.closed = true
 	lob.prefix = nil
 	lob.pending = nil
+	lob.pendingHighSurrogate = 0
 	lob.mu.Unlock()
 	owner.releaseLob(lob)
 	return locatorBytes, nil
@@ -286,7 +303,13 @@ func (lob *streamedLob) Read(dst []byte) (int, error) {
 		return 0, common.NewOracleError(oracleErrors.LobValueInvalidated, err, "Rows owner")
 	}
 	lob.locator.offset = lob.nextOffset
-	payload, logical, readErr := lob.manager.read(ctx, lob.Kind(), lob.locator, driverCommon.UB8(request))
+	payload, logical, readErr := lob.manager.read(
+		ctx,
+		lob.Kind(),
+		lob.locator,
+		driverCommon.UB8(request),
+		lob.pendingHighSurrogate,
+	)
 	unsafeStream := readErr != nil && !isCompletedLobResponseError(readErr)
 	release()
 	if readErr != nil {
@@ -332,6 +355,7 @@ func (lob *streamedLob) Read(dst []byte) (int, error) {
 		owner.releaseLob(lob)
 		return 0, err
 	}
+	lob.pendingHighSurrogate = 0
 	// The executor returns a fresh converted payload. Retain it only when the
 	// caller's buffer cannot consume the complete response in this call.
 	lob.nextOffset += logical
@@ -492,6 +516,7 @@ func (lob *streamedLob) Close() error {
 	lob.closed = true
 	lob.prefix = nil
 	lob.pending = nil
+	lob.pendingHighSurrogate = 0
 	lob.mu.Unlock()
 	if owner != nil {
 		owner.releaseLob(lob)
@@ -505,6 +530,7 @@ func (lob *streamedLob) invalidate() {
 	lob.invalidated = true
 	lob.prefix = nil
 	lob.pending = nil
+	lob.pendingHighSurrogate = 0
 	lob.mu.Unlock()
 }
 
