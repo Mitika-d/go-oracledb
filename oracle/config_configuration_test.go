@@ -253,6 +253,31 @@ func TestConfiguration_AssignFromEmptyFlags(t *testing.T) {
 
 }
 
+func TestConfiguration_AssignFromFlagsDoesNotParseApplicationFlags(t *testing.T) {
+	originalCommandLine := flag.CommandLine
+	originalArgs := os.Args
+	t.Cleanup(func() {
+		flag.CommandLine = originalCommandLine
+		os.Args = originalArgs
+	})
+
+	flag.CommandLine = flag.NewFlagSet("application", flag.ContinueOnError)
+	flag.CommandLine.String("application-flag", "", "application-owned flag")
+	os.Args = []string{"application", "-application-flag", "value"}
+
+	driverConfig := NewOracleDriverConfig()
+	if err := driverConfig.AssignFromFlags(); err != nil {
+		t.Fatalf("unparsed application flags should not raise an error: %v", err)
+	}
+	loggingConfig := oracleconfig.NewOracleLoggingConfig()
+	if err := loggingConfig.AssignFromFlags(); err != nil {
+		t.Fatalf("unparsed application flags should not raise a logging error: %v", err)
+	}
+	if flag.CommandLine.Parsed() {
+		t.Fatal("Oracle driver must not parse application-owned flags")
+	}
+}
+
 // TestConfiguration_Clone checks Clone of configuration
 // expectations:
 //
