@@ -168,7 +168,7 @@ func TestDriver_LobStreamingReadMultipleBLOBColumns(t *testing.T) {
 		t.Skip("No configuration available")
 	}
 
-	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize)
+	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize, true)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -235,6 +235,47 @@ func TestDriver_LobStreamingReadMultipleBLOBColumns(t *testing.T) {
 }
 
 const functionalLobPrefetchSize = 32 * 1024
+
+// TestDriver_LobPrefetchMaterializesSmallerValue verifies that a BLOB just
+// below the connection prefetch limit is returned as a materialized value
+// without opting in to locator-backed reading. The test lowers the prefetch
+// limit to keep the same protocol boundary practical for functional runs.
+func TestDriver_LobPrefetchMaterializesSmallerValue(t *testing.T) {
+	if TestingConfig == nil {
+		t.Skip("No configuration available")
+	}
+
+	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize, false)
+	if err != nil {
+		t.Fatalf("open test DB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	table := createLOBObjectName(t)
+	if err := createTable(ctx, db, table, map[string]string{"id": "NUMBER PRIMARY KEY", "bin": "BLOB"}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	t.Cleanup(func() { _ = dropTable(ctx, db, table) })
+
+	size := functionalLobPrefetchSize - 1
+	t.Logf("create and fetch %d-byte prefetched BLOB", size)
+	payload := binaryFixture(size)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (id, bin) VALUES (:1, :2)", table), int64(1), BindBlob(payload)); err != nil {
+		t.Fatalf("insert prefetched BLOB: %v", err)
+	}
+	var value lob.Bytes
+	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT bin FROM %s WHERE id = :1", table), int64(1)).Scan(&value); err != nil {
+		t.Fatalf("scan prefetched BLOB: %v", err)
+	}
+	if len(value) != size {
+		t.Fatalf("prefetched BLOB length = %d, want %d", len(value), size)
+	}
+	if gotDigest, wantDigest := sha256.Sum256(value), sha256.Sum256(payload); gotDigest != wantDigest {
+		t.Fatalf("prefetched BLOB digest = %x, want %x", gotDigest, wantDigest)
+	}
+}
 
 // TestDriver_LobMaterializesPastPrefetch verifies that compatibility mode
 // continues reading a BLOB after its prefetched prefix and returns []byte.
