@@ -202,9 +202,9 @@ func (p *ttiLobRpa) UnMarshalFrom(ctx context.Context, mar driverCommon.Marshall
 		common.Odl.Debug("TTILobRpa.UnmarshalFrom: charset ID unmarshalled", "charset_id", p.lobDefinition.charsetID)
 	}
 
-	// (4) retrieve lobamt. OLOBOPS write acknowledgements use the legacy UB4
-	// output slot even though their requested input amount is UB8.
-	if p.lobDefinition.sendLobAmt {
+	// (4) retrieve lobamt. Temporary-create responses omit it. Write
+	// acknowledgements use UB4; other amount-returning operations use UB8.
+	if p.lobDefinition.sendLobAmt && p.lobDefinition.operation != kplobTmpCreate {
 		if p.lobDefinition.operation == kplobWrite {
 			var written driverCommon.UB4
 			written, err = mar.UnmarshalUB4(ctx)
