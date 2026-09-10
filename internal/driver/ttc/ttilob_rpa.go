@@ -202,13 +202,13 @@ func (p *ttiLobRpa) UnMarshalFrom(ctx context.Context, mar driverCommon.Marshall
 		common.Odl.Debug("TTILobRpa.UnmarshalFrom: charset ID unmarshalled", "charset_id", p.lobDefinition.charsetID)
 	}
 
-	// (4) retrieve lobamt. Temporary-create responses omit it. Write
-	// acknowledgements use UB4; other amount-returning operations use UB8.
-	if p.lobDefinition.sendLobAmt && p.lobDefinition.operation != kplobTmpCreate {
-		if p.lobDefinition.operation == kplobWrite {
-			var written driverCommon.UB4
-			written, err = mar.UnmarshalUB4(ctx)
-			p.lobDefinition.lobAmt = driverCommon.UB8(written)
+	// (4) retrieve lobamt. Temporary-create and write responses use the
+	// legacy UB4 output slot; other amount-returning operations use UB8.
+	if p.lobDefinition.sendLobAmt {
+		if p.lobDefinition.operation == kplobWrite || p.lobDefinition.operation == kplobTmpCreate {
+			var amount driverCommon.UB4
+			amount, err = mar.UnmarshalUB4(ctx)
+			p.lobDefinition.lobAmt = driverCommon.UB8(amount)
 		} else {
 			p.lobDefinition.lobAmt, err = mar.UnmarshalUB8(ctx)
 		}

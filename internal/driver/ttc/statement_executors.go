@@ -1445,21 +1445,15 @@ func unregisterRunQueryCallbacks(stmr MessageStreamerInterface) {
 	stmr.UnRegisterPostUnmarshallCallback(TTIRXH)
 }
 
-// registerRunExecCallbacks sets up required OALLRPA and row-header handling for
-// exec responses. Locator-backed DML can include a nonterminal TTIRXH before
-// its RPA/OER completion; the header carries no result consumed by ExecContext.
+// registerRunExecCallbacks sets up required pre-unmarshal OALLRPA callback for exec context.
 func registerRunExecCallbacks(stmr MessageStreamerInterface, shelf *ttiShelf[driverCommon.MessageType]) {
 	registerOallRpaCallbacks(stmr, shelf)
-	stmr.RegisterPostUnmarshallCallback(TTIRXH, func(_ driverCommon.Message[driverCommon.MessageType], err error) (bool, error) {
-		return false, err
-	})
 }
 
-// unregisterRunExecCallbacks removes callbacks installed for exec context.
+// unregisterRunExecCallbacks removes TTIRPA OALLRPA callback just for exec context.
 func unregisterRunExecCallbacks(stmr MessageStreamerInterface) {
 	stmr.UnRegisterPreUnmarshallCallback(TTIRPA)
 	stmr.UnRegisterPostUnmarshallCallback(TTIRPA)
-	stmr.UnRegisterPostUnmarshallCallback(TTIRXH)
 }
 
 // registerOallRpaCallbacks registers OALLRPA for TTIRPA (used in both query and exec contexts).

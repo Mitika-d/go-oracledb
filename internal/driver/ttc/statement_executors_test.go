@@ -340,40 +340,6 @@ func TestStatementExecutor_DML_Insert_MarshalAndExec(t *testing.T) {
 	}
 }
 
-func TestStatementExecutor_DML_DiscardsNonterminalRowHeader(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	shelf, _, dbuf := newExecTestShelf(16384)
-
-	if err := dbuf.WriteByteWithContext(ctx, byte(TTIRXH)); err != nil {
-		t.Fatalf("write TTIRXH header failed: %v", err)
-	}
-	if err := dbuf.WriteBytesWithContext(ctx, makeTtirxhPayload(validTtirxhDump)); err != nil {
-		t.Fatalf("write TTIRXH payload failed: %v", err)
-	}
-	if err := dbuf.WriteByteWithContext(ctx, byte(TTIRPA)); err != nil {
-		t.Fatalf("write TTIRPA header failed: %v", err)
-	}
-	if err := dbuf.WriteBytesWithContext(ctx, makeOall8RPAPayloadFromDump(validTTIRPAInsertDump)); err != nil {
-		t.Fatalf("write OALL8 RPA payload failed: %v", err)
-	}
-
-	exec := newStatementExecutorDML()
-	exec.SetShelf(shelf)
-	exec.SetSessionContext(common.NewSessionContext())
-	q, _ := newQualifiedSQLStatement("INSERT INTO t (x) VALUES(1)")
-	result, err := exec.ExecContext(ctx, q, nil)
-	if err != nil {
-		t.Fatalf("ExecContext with nonterminal row header failed: %v", err)
-	}
-	if affected, err := result.RowsAffected(); err != nil || affected != 3 {
-		t.Fatalf("RowsAffected = (%d, %v), want (3, nil)", affected, err)
-	}
-	if err := shelf.checkCurrentState(ctx); err != nil {
-		t.Fatalf("row header remained queued after DML completion: %v", err)
-	}
-}
-
 func TestStatementExecutorDML_TTIFOBFlushesAndContinuesPull(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
