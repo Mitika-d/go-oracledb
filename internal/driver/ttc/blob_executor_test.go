@@ -177,7 +177,7 @@ func TestBlobExecutor_Write(t *testing.T) {
 	locatorBytes[koll1FlagOffset] = kolblBlobFlag
 
 	// Step 1: stage a minimal TTIRPA response containing the returned locator
-	// and byte count. The test shelf supplies the terminal successful OER.
+	// and the UB4 byte count. The test shelf supplies the terminal successful OER.
 	shelf, _, dbuf := newLobTestShelf(1024)
 	response := append(driverCommon.B1Array{byte(TTIRPA)}, locatorBytes...)
 	response = append(response, 0x01, byte(len(payload)))

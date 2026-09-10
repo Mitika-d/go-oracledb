@@ -177,8 +177,8 @@ type lobDefinition struct {
 	// read-only requests this can remain empty.
 	destinationLocator *locator
 
-	// lobAmt conveys the number of bytes/characters to transfer. Some operations request the
-	// amount while others may use it to report results.
+	// lobAmt conveys the number of bytes/characters to transfer or retrieve.
+	// Write responses return this value as a UB4; other amount responses use UB8.
 	lobAmt common.UB8
 
 	// charsetID identifies the character set to interpret the payload when the LOB represents
@@ -189,8 +189,8 @@ type lobDefinition struct {
 	// set, the driver communicates that the server should treat absent locators as NULL values.
 	nullO2U bool
 
-	// sendLobAmt indicates whether the client should marshal lobAmt into the request; certain
-	// operations derive their size from auxiliary data and do not require this field.
+	// sendLobAmt indicates whether OLOBOPS has an amount pointer and payload.
+	// The flag also requests a returned amount, whose width depends on the operation.
 	sendLobAmt bool
 
 	// lobNull signals that the underlying LOB locator is NULL, instructing the server to handle
@@ -295,6 +295,9 @@ func newLobDefinitionForReadOperation(
 //
 // Returns:
 //   - *lobDefinition: structure populated with buffer metadata and a kplobWrite operation.
+//
+// OLOBOPS receives the requested amount as UB8, while its TTIRPA acknowledgement
+// returns the written amount as UB4.
 func newLobDefinitionForWriteOperation(
 	sourceLocator *locator,
 	lobAmt common.UB8,
@@ -419,7 +422,7 @@ func newLobDefinitionForIsOpenOperation(sourceLocator *locator, operation lobOpe
 //   - tempLocatorSize: size of the locator buffer to allocate on the client side.
 //   - formOfUse: encodes the character semantics (e.g., byte vs char) in sourceOffset.
 //   - lobType: indicates the kind of temporary LOB (BLOB/CLOB/NCLOB) via destinationOffset.
-//   - duration: life span of the temporary LOB, marshaled both in destinationLength and lobAmt.
+//   - duration: life span of the temporary LOB, marshaled in destinationLength.
 //   - cache: whether the temporary LOB should be cached on the server (affects lobscn).
 //   - charsetID: character set identifier for text LOBs, or a non-zero protocol
 //     placeholder when OLOBOPS requires a charset pointer for a binary LOB. A

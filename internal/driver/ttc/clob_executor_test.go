@@ -168,10 +168,11 @@ func TestClobExecutor_CreateTemporaryLob(t *testing.T) {
 	shelf, _, dbuf := newLobTestShelf(8192)
 	expectedLocator := newSrcLocator()
 
-	if err := dbuf.WriteByteWithContext(ctx, byte(TTIRPA)); err != nil {
-		t.Fatalf("write TTIRPA header failed: %v", err)
-	}
-	if err := dbuf.WriteBytesWithContext(ctx, makeLobPayloadFromDump(clobTempLocatorRPAGoldenPayload)); err != nil {
+	response := make(driverCommon.B1Array, kolllTempWithSignature)
+	copy(response, expectedLocator)
+	response = append(driverCommon.B1Array{byte(TTIRPA)}, response...)
+	response = append(response, 0x02, 0x03, 0x69, 0x01, 0x60, 0x01, 0x01)
+	if err := dbuf.WriteBytesWithContext(ctx, response); err != nil {
 		t.Fatalf("write oLobOps RPA (CreateTemporary) payload failed: %v", err)
 	}
 	marshalWritePosition := dbuf.currentWritePosition
@@ -208,10 +209,9 @@ func TestClobExecutor_Write(t *testing.T) {
 	shelf, _, dbuf := newLobTestShelf(65536)
 	locator := newSrcLocator()
 
-	if err := dbuf.WriteByteWithContext(ctx, byte(TTIRPA)); err != nil {
-		t.Fatalf("write TTIRPA header failed: %v", err)
-	}
-	if err := dbuf.WriteBytesWithContext(ctx, makeLobPayloadFromDump(clobWriteRPAGoldenPayload)); err != nil {
+	response := append(driverCommon.B1Array{byte(TTIRPA)}, locator...)
+	response = append(response, 0x02, 0x02, 0x58)
+	if err := dbuf.WriteBytesWithContext(ctx, response); err != nil {
 		t.Fatalf("write oLobOps RPA (Write) payload failed: %v", err)
 	}
 	marshalWritePosition := dbuf.currentWritePosition
@@ -1385,29 +1385,6 @@ var clobTempLocatorMarshalGoldenPayload = []string{
 	`"69 01 01 01 0A"`,
 }
 
-var clobTempLocatorRPAGoldenPayload = []string{
-	`"00 26 00 01 82"`,
-	`"08 80 03 00 02 29 25 00"`,
-	`"00 01 17 00 00 00 01 03"`,
-	`"69 00 0A 00 00 00 01 00"`,
-	`"00 49 2E 32 09 00 00 00"`,
-	`"01 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 02"`,
-	`"03 69 01 60 01 01 04 01"`,
-	`"01 02 20 0D 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 06"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00"`,
-}
-
 var clobWriteMarshalGoldenPayload = []string{
 	`"03 60 01 00 01 01"`,
 	`"28 00 00 00 00 00 00 00"`,
@@ -1417,8 +1394,7 @@ var clobWriteMarshalGoldenPayload = []string{
 	`"29 25 00 00 01 17 00 00"`,
 	`"00 01 03 69 00 0A 00 00"`,
 	`"00 01 00 00 49 2E 32 09"`,
-	`"00 00 00 01 00 00 02 02"`,
-	`"58 0E FE 02 04 B0 00 54"`,
+	`"00 00 00 01 00 00 02 02 58 0E FE 02 04 B0 00 54"`,
 	`"00 68 00 69 00 73 00 20"`,
 	`"00 69 00 73 00 20 00 61"`,
 	`"00 20 00 6C 00 61 00 72"`,
@@ -1569,20 +1545,6 @@ var clobWriteMarshalGoldenPayload = []string{
 	`"00 74 00 20 00 65 00 78"`,
 	`"00 61 00 6D 00 70 00 6C"`,
 	`"00 65 00 2E 00 20 00"`,
-}
-
-var clobWriteRPAGoldenPayload = []string{
-	`"00 26 00 01 82"`,
-	`"08 80 03 00 02 29 25 00"`,
-	`"00 01 17 00 00 00 01 03"`,
-	`"69 00 0A 00 00 00 01 00"`,
-	`"00 49 2E 32 09 00 00 00"`,
-	`"01 00 00 02 02 58 04 01"`,
-	`"01 02 20 0F 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 08"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00"`,
 }
 
 // Read golden payloads captured from a representative TTC trace.

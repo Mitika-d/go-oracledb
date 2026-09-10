@@ -361,6 +361,36 @@ func TestTTILobRpa_UnMarshalFrom_Success(t *testing.T) {
 	}
 }
 
+// TestTTILobRpa_WriteUsesUB4ResponseAmount verifies the native OLOBOPS write
+// acknowledgement ends after its UB4 amount. Decoding it as UB8 consumes the
+// next TTC message and reproduces the live explicit-BLOB bind failure.
+func TestTTILobRpa_WriteUsesUB4ResponseAmount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	locatorBytes := common.B1Array{0, 6, 1, 2, 3, 4, 5, 6}
+	response := append(common.B1Array(nil), locatorBytes...)
+	response = append(response, 0, 4, 0, 0) // 256 KiB native UB4
+
+	buffer := NewArrayDataBuffer(len(response))
+	if err := buffer.WriteBytesWithContext(ctx, response); err != nil {
+		t.Fatalf("stage native write RPA: %v", err)
+	}
+	def := newLobDefinitionForWriteOperation(newLocator(make(common.B1Array, len(locatorBytes)), 1), 0)
+	msg := newTTILobRPA().(*ttiLobRpa)
+	if err := msg.SetDefinition(def); err != nil {
+		t.Fatalf("SetDefinition: %v", err)
+	}
+	if err := msg.UnMarshalFrom(ctx, NewNativeMarshalEngine(buffer, common.BIG_ENDIAN)); err != nil {
+		t.Fatalf("UnMarshalFrom native UB4 write response: %v", err)
+	}
+	if def.lobAmt != 256*1024 {
+		t.Fatalf("write amount = %d, want %d", def.lobAmt, 256*1024)
+	}
+	if !bytes.Equal(def.sourceLocator.locatorBytes, locatorBytes) {
+		t.Fatalf("refreshed locator = % X, want % X", def.sourceLocator.locatorBytes, locatorBytes)
+	}
+}
+
 type lobRpaFailureCase struct {
 	name       string
 	payload    []string

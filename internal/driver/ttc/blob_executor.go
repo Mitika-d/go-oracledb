@@ -264,8 +264,8 @@ func (b *blobExecutor) createTemporaryLob(ctx context.Context, cache bool, durat
 //   - data: raw bytes to write without character-set conversion.
 //
 // Returns:
-//   - driverCommon.UB8: number of bytes reported written by the server.
-//   - error: nil when the operation succeeds.
+//   - driverCommon.UB8: number of bytes acknowledged by the server's UB4 write response.
+//   - error: nil when Oracle accepts the write.
 //
 // Errors:
 //   - Returns InvalidLOBBuffer for value-based or read-only locators.

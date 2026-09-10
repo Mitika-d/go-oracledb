@@ -322,8 +322,8 @@ func (c *clobExecutor) createTemporaryLob(ctx context.Context, cache bool, durat
 //   - numChars: number of characters to write from the buffer.
 //
 // Returns:
-//   - driverCommon.UB8: number of characters reported written to the LOB.
-//   - error: nil on success.
+//   - driverCommon.UB8: number of UCS-2 units acknowledged by the server's UB4 write response.
+//   - error: nil when Oracle accepts the write.
 //
 // Errors:
 //   - Propagates validation failures from validateLobOperation.
@@ -392,7 +392,6 @@ func (c *clobExecutor) write(
 
 	writeBuffer := driverCommon.B1Array(binaryWriteBuffer[:bytesConverted])
 	def := newLobDefinitionForWriteOperation(lobLocator, lobAmt)
-	def.sendLobAmt = true
 
 	if common.Odl.Enabled(ctx, slog.LevelDebug) {
 		common.Odl.Debug(
@@ -401,7 +400,7 @@ func (c *clobExecutor) write(
 			"isNCLOB", isNCLOB,
 			"bytesConverted", bytesConverted,
 			"lobAmt", lobAmt,
-			"sendLobAmt", true,
+			"sendLobAmt", def.sendLobAmt,
 		)
 	}
 
