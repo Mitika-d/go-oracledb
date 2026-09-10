@@ -244,6 +244,7 @@ var testCases = []struct {
 	{"TestStatementExecutor_Others_Drop_MarshalAndExec", "unitary", false, TestStatementExecutor_Others_Drop_MarshalAndExec},
 	{"TestStatementExecutor_Others_Create_MarshalAndExec", "unitary", false, TestStatementExecutor_Others_Create_MarshalAndExec},
 	{"TestStatementExecutor_DML_Insert_MarshalAndExec", "unitary", false, TestStatementExecutor_DML_Insert_MarshalAndExec},
+	{"TestStatementExecutor_DML_DiscardsNonterminalRowHeader", "unitary", false, TestStatementExecutor_DML_DiscardsNonterminalRowHeader},
 	{"TestStatementExecutorDML_TTIFOBFlushesAndContinuesPull", "unitary", false, TestStatementExecutorDML_TTIFOBFlushesAndContinuesPull},
 	{"TestStatementExecutor_Select_MarshalAndQuery", "unitary", false, TestStatementExecutor_Select_MarshalAndQuery},
 	{"TestStatementExecutor_Select_DoesNotReuseStaleBVCStateAcrossExecutions", "unitary", false, TestStatementExecutor_Select_DoesNotReuseStaleBVCStateAcrossExecutions},
