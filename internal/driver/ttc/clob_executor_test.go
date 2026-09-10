@@ -72,7 +72,10 @@ func newLobTestShelf(bufSize int) (*driverCommon.Shelf[driverCommon.MessageType]
 	ttiShelf.RegisterMarshaller(mar)
 
 	funcReg := NewRegistry[functionRegistryKey]()
+	_ = funcReg.Register(functionRegistryKey{messageType: TTIFUN, functionType: oLobOps}, 18, newTTIlob18)
 	_ = funcReg.Register(functionRegistryKey{messageType: TTIFUN, functionType: oLobOps}, 1, newTTIlob)
+	_ = funcReg.Register(functionRegistryKey{messageType: TTIPFN, functionType: oLobOps}, 18, newTTIlobPiggyback18)
+	_ = funcReg.Register(functionRegistryKey{messageType: TTIPFN, functionType: oLobOps}, 1, newTTIlobPiggyback)
 	_ = funcReg.Register(functionRegistryKey{messageType: TTIRPA, functionType: oLobOps}, 1, newTTILobRPA)
 
 	msgReg := NewRegistry[driverCommon.MessageType]()
@@ -1364,11 +1367,11 @@ var lobGetChunkSizeMarshalGoldenPayload = []string{
 }
 
 var clobTempLocatorMarshalGoldenPayload = []string{
-	`"03 60 01 00 01 01"`,
-	`"6C 00 01 0A 00 00 01 00"`,
-	`"01 02 01 10 01 01 01 01"`,
-	`"01 01 70 01 00 00 00 00"`,
-	`"00 00 00 6A 00 00 00 00"`,
+	`"03 60 01 00 01 01 6C 00"`,
+	`"01 0A 00 00 01 00 01 02"`,
+	`"01 10 01 01 01 01 01 01"`,
+	`"70 00 00 00 00 00 00 00"`,
+	`"00 6A 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
@@ -1381,8 +1384,8 @@ var clobTempLocatorMarshalGoldenPayload = []string{
 	`"00 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 02 03"`,
-	`"69 01 01 01 0A"`,
+	`"00 00 00 00 02 03 69 01"`,
+	`"01"`,
 }
 
 var clobWriteMarshalGoldenPayload = []string{

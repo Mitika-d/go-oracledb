@@ -191,7 +191,19 @@ func (ms *MessageStreamer) Push(ctx context.Context, msg driverCommon.Message[dr
 					sendLobAmt:    false,
 					operation:     kplobArrayTmpFree,
 				}
-				piggyback := newTTIlobPiggyback().(*tTIlob)
+				message, err := ms.shelf.GetMessageFactory().GetMessageForFunction(TTIPFN, oLobOps)
+				if err != nil {
+					ms.shelf.lobState.lobReferenceRegistry.restorePending(batch)
+					return err
+				}
+				piggyback, ok := message.(*tTIlob)
+				if !ok {
+					ms.shelf.lobState.lobReferenceRegistry.restorePending(batch)
+					return common.NewOracleError(
+						oracleErrors.InternalError,
+						fmt.Errorf("LOB cleanup piggyback has unexpected type %T", message),
+					)
+				}
 				if err := piggyback.SetDefinition(definition); err != nil {
 					ms.shelf.lobState.lobReferenceRegistry.restorePending(batch)
 					return err

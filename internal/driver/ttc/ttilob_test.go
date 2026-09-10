@@ -39,6 +39,7 @@
 package ttc
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -57,8 +58,8 @@ func TestTTIlob_New(t *testing.T) {
 	if msg == nil {
 		t.Fatal("expected non-nil tTIlob instance")
 	}
-	if _, ok := msg.header.(*ttiFunHeader18); !ok {
-		t.Fatalf("expected header to be *ttiFunHeader18, got %T", msg.header)
+	if _, ok := msg.header.(*ttiFunHeader); !ok {
+		t.Fatalf("expected header to be *ttiFunHeader, got %T", msg.header)
 	}
 	if msg.lobPayloadDefinition != nil {
 		t.Fatalf("expected definition to be nil by default")
@@ -128,6 +129,55 @@ func TestTTIlob_GetFuncCode(t *testing.T) {
 	msg := newTTIlob().(*tTIlob)
 	if got := msg.GetFuncCode(); got != oLobOps {
 		t.Fatalf("GetFuncCode mismatch: want %v, got %v", oLobOps, got)
+	}
+}
+
+// TestTTIlobFactorySelectsVersionedHeader verifies pre-v18 servers receive the
+// base function header while v18+ servers receive its token field.
+func TestTTIlobFactorySelectsVersionedHeader(t *testing.T) {
+	t.Parallel()
+
+	for _, messageType := range []driverCommon.MessageType{TTIFUN, TTIPFN} {
+		base := marshalFactoryLob(t, 12, messageType)
+		extended := marshalFactoryLob(t, 18, messageType)
+		if len(extended) != len(base)+1 {
+			t.Fatalf("%s header lengths = base %d, extended %d; want one token byte", TTCMsgTypeDescription[messageType], len(base), len(extended))
+		}
+		if !bytes.Equal(base[:2], extended[:2]) || extended[2] != 0 || !bytes.Equal(base[2:], extended[3:]) {
+			t.Fatalf("%s versioned header mismatch:\n base: % X\n  v18: % X", TTCMsgTypeDescription[messageType], base, extended)
+		}
+	}
+}
+
+func marshalFactoryLob(t *testing.T, protocol int8, messageType driverCommon.MessageType) []byte {
+	t.Helper()
+	message, err := newTestOLobOpsFactory(protocol).GetMessageForFunction(messageType, oLobOps)
+	if err != nil {
+		t.Fatalf("protocol %d %s OLOBOPS factory: %v", protocol, TTCMsgTypeDescription[messageType], err)
+	}
+	lobMessage, ok := message.(*tTIlob)
+	if !ok {
+		t.Fatalf("protocol %d %s OLOBOPS message = %T", protocol, TTCMsgTypeDescription[messageType], message)
+	}
+	if err := lobMessage.SetDefinition(&lobDefinition{operation: kplobRead}); err != nil {
+		t.Fatal(err)
+	}
+	buffer, marshaller := NewMarshalEngineTest(driverCommon.BIG_ENDIAN, Universal, Universal, 4096)
+	if err := lobMessage.MarshalTo(context.Background(), marshaller); err != nil {
+		t.Fatal(err)
+	}
+	return append([]byte(nil), buffer.bytes[:buffer.currentWritePosition]...)
+}
+func newTestOLobOpsFactory(protocol int8) Factory {
+	functions := NewRegistry[functionRegistryKey]()
+	_ = functions.Register(functionRegistryKey{messageType: TTIFUN, functionType: oLobOps}, MinTTCProtocolVersion, newTTIlob)
+	_ = functions.Register(functionRegistryKey{messageType: TTIFUN, functionType: oLobOps}, 18, newTTIlob18)
+	_ = functions.Register(functionRegistryKey{messageType: TTIPFN, functionType: oLobOps}, MinTTCProtocolVersion, newTTIlobPiggyback)
+	_ = functions.Register(functionRegistryKey{messageType: TTIPFN, functionType: oLobOps}, 18, newTTIlobPiggyback18)
+	return &SimpleFactory{
+		ttcVersion:   protocol,
+		msgregistry:  NewRegistry[driverCommon.MessageType](),
+		funcregistry: functions,
 	}
 }
 
@@ -265,7 +315,7 @@ func TestTTIlob_MarshalTo_Fail(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			msg := newTTIlob().(*tTIlob)
+			msg := newTTIlob18().(*tTIlob)
 			definition := makeCommonDefinition()
 			if tc.mutate != nil {
 				tc.mutate(definition)

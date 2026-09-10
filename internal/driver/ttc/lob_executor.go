@@ -41,6 +41,7 @@ package ttc
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
@@ -634,11 +635,24 @@ func (e *lobExecutor) _registerLobRPACallback(def *lobDefinition) {
 	})
 }
 
-// _pushLobRequest places the primary TTILOB message with the requested operation onto the stream.
+// _pushLobRequest places the protocol-versioned TTILOB message with the
+// requested operation onto the stream.
 func (e *lobExecutor) _pushLobRequest(ctx context.Context, def *lobDefinition) error {
 	stmr, _ := e.shelf.GetMessageStreamer().(MessageStreamerInterface)
-	msg := newTTIlob().(*tTIlob)
-	msg.SetDefinition(def)
+	message, err := e.shelf.GetMessageFactory().GetMessageForFunction(TTIFUN, oLobOps)
+	if err != nil {
+		return common.NewOracleError(oracleErrors.LobExecError, err, "create OLOBOPS request")
+	}
+	msg, ok := message.(*tTIlob)
+	if !ok {
+		return common.NewOracleError(
+			oracleErrors.LobExecError,
+			fmt.Errorf("OLOBOPS request has unexpected type %T", message),
+		)
+	}
+	if err := msg.SetDefinition(def); err != nil {
+		return common.NewOracleError(oracleErrors.LobExecError, err, "configure OLOBOPS request")
+	}
 	if err := stmr.Push(ctx, msg); err != nil {
 		common.Odl.Error("lobExecutor.pushLobRequest: Push failed", "error", err)
 		return common.NewOracleError(oracleErrors.LobExecError, err, "push")

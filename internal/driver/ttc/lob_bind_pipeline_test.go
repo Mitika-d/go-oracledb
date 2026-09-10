@@ -498,6 +498,7 @@ func TestLobBindPipeline_EnqueueLobFreeDefersAndInvalidatesLocator(t *testing.T)
 	t.Parallel()
 
 	shelf := newShelf[driverCommon.MessageType]()
+	shelf.RegisterMessageFactory(newTestOLobOpsFactory(18))
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	loc := newTestLobReferenceLocator(101)
@@ -532,6 +533,7 @@ func TestLobBindPipeline_CanceledLobExchangeUsesBreakResetAndRestoresStream(t *t
 	t.Parallel()
 
 	shelf := newShelf[driverCommon.MessageType]()
+	shelf.RegisterMessageFactory(newTestOLobOpsFactory(18))
 	cancelCalled := make(chan struct{}, 1)
 	shelf.registerCancelExecution(func(context.Context) error {
 		cancelCalled <- struct{}{}
@@ -584,6 +586,7 @@ func TestLobBindPipeline_CanceledLobExchangeDiscardsStreamWhenRecoveryFails(t *t
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			shelf := newShelf[driverCommon.MessageType]()
+			shelf.RegisterMessageFactory(newTestOLobOpsFactory(18))
 			shelf.registerCancelExecution(func(context.Context) error { return test.breakErr })
 			parent, cancelParent := context.WithCancel(context.Background())
 			streamer := &fakeStreamer{}

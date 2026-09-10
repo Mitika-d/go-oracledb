@@ -70,6 +70,7 @@ func TestLobExecutor_ErrorClassificationAndCancellation(t *testing.T) {
 	}
 
 	shelf := newShelf[common.MessageType]()
+	shelf.RegisterMessageFactory(newTestOLobOpsFactory(18))
 	shelf.registerCancelExecution(func(context.Context) error { return nil })
 	parent, cancelParent := context.WithCancel(context.Background())
 	serverErr := errors.New("server rejected operation")
@@ -90,6 +91,38 @@ func TestLobExecutor_ErrorClassificationAndCancellation(t *testing.T) {
 		newLobDefinitionForGetLengthOperation(newLocator(common.B1Array("locator"), 1)))
 	if !isCompletedLobResponseError(err) || !errors.Is(err, serverErr) {
 		t.Fatalf("cancel recovery error = %v, want completed server error", err)
+	}
+}
+func TestLobExecutorPushLobRequestUsesNegotiatedHeader(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		protocol int8
+		extended bool
+	}{
+		{protocol: 12, extended: false},
+		{protocol: 18, extended: true},
+	} {
+		shelf := newShelf[common.MessageType]()
+		shelf.RegisterMessageFactory(newTestOLobOpsFactory(test.protocol))
+		streamer := NewMessageStreamer(shelf)
+		shelf.RegisterMessageStreamer(streamer)
+
+		err := newLobExecutor(shelf.Shelf)._pushLobRequest(
+			context.Background(),
+			newLobDefinitionForGetLengthOperation(newLocator(common.B1Array("locator"), 1)),
+		)
+		if err != nil {
+			t.Fatalf("protocol %d push: %v", test.protocol, err)
+		}
+		message, ok := streamer.outgoingMessages.Back().Value.(*tTIlob)
+		if !ok {
+			t.Fatalf("protocol %d queued message = %T", test.protocol, streamer.outgoingMessages.Back().Value)
+		}
+		_, extended := message.header.(*ttiFunHeader18)
+		if extended != test.extended {
+			t.Fatalf("protocol %d extended header = %t, want %t", test.protocol, extended, test.extended)
+		}
 	}
 }
 

@@ -65,25 +65,30 @@ type tTIlob struct {
 	definitionConfigured bool
 }
 
-// newTTIlob creates a TTC message preconfigured for OLOBOPS execution.
-//
-// Returns:
-//   - *tTIlob: message with a TTIFUN header targeting the oLobOps function.
+// newTTIlob creates a pre-v18 OLOBOPS request using the base function header.
 func newTTIlob() driverCommon.Message[driverCommon.MessageType] {
-	return newTTIlobWithMessageType(TTIFUN)
+	return newTTIlobWithHeader(TTIFUN, &ttiFunHeader{_funcType: oLobOps})
 }
 
-// newTTIlobPiggyback creates an OLOBOPS message carried by a TTIPFN envelope.
-// The function header remains oLobOps; TTIPFN is only the outer TTC message
-// code used by the streamer for client-to-server piggybacks.
+// newTTIlob18 creates a v18+ OLOBOPS request with the function token field.
+func newTTIlob18() driverCommon.Message[driverCommon.MessageType] {
+	return newTTIlobWithHeader(TTIFUN, &ttiFunHeader18{ttiFunHeader: &ttiFunHeader{_funcType: oLobOps}})
+}
+
+// newTTIlobPiggyback creates a pre-v18 OLOBOPS cleanup piggyback.
 func newTTIlobPiggyback() driverCommon.Message[driverCommon.MessageType] {
-	return newTTIlobWithMessageType(TTIPFN)
+	return newTTIlobWithHeader(TTIPFN, &ttiFunHeader{_funcType: oLobOps})
 }
 
-func newTTIlobWithMessageType(messageType driverCommon.MessageType) driverCommon.Message[driverCommon.MessageType] {
+// newTTIlobPiggyback18 creates a v18+ OLOBOPS cleanup piggyback.
+func newTTIlobPiggyback18() driverCommon.Message[driverCommon.MessageType] {
+	return newTTIlobWithHeader(TTIPFN, &ttiFunHeader18{ttiFunHeader: &ttiFunHeader{_funcType: oLobOps}})
+}
+
+func newTTIlobWithHeader(messageType driverCommon.MessageType, header driverCommon.Marshallable) driverCommon.Message[driverCommon.MessageType] {
 	return &tTIlob{
 		messageType: messageType,
-		header:      &ttiFunHeader18{ttiFunHeader: &ttiFunHeader{_funcType: oLobOps}},
+		header:      header,
 	}
 }
 

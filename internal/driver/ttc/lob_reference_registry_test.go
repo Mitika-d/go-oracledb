@@ -77,13 +77,18 @@ func newTestLobReferenceLocator(seed byte) *locator {
 	}
 	return newLocator(data, 1)
 }
+func newLobRegistryTestShelf() *ttiShelf[common.MessageType] {
+	shelf := newShelf[common.MessageType]()
+	shelf.RegisterMessageFactory(newTestOLobOpsFactory(18))
+	return shelf
+}
 
 // TestLobReferenceRegistry_ReferenceCountDefersFreeUntilLastAlias verifies a free
 // is deferred until the final local alias is released.
 func TestLobReferenceRegistry_ReferenceCountDefersFreeUntilLastAlias(t *testing.T) {
 	t.Parallel()
 
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	first := newTestLobReferenceLocator(1)
@@ -126,7 +131,7 @@ func TestLobReferenceRegistry_ReferenceCountDefersFreeUntilLastAlias(t *testing.
 func TestLobReferenceRegistry_LastReleasePiggybacksBeforeNextFunction(t *testing.T) {
 	t.Parallel()
 
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	loc := newTestLobReferenceLocator(17)
@@ -167,13 +172,48 @@ func TestLobReferenceRegistry_LastReleasePiggybacksBeforeNextFunction(t *testing
 		t.Fatal("ordinary TTC function was not queued after the LOB-free piggyback")
 	}
 }
+func TestLobReferenceRegistryUsesNegotiatedPiggybackHeader(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		protocol int8
+		extended bool
+	}{
+		{protocol: 12, extended: false},
+		{protocol: 18, extended: true},
+	} {
+		shelf := newShelf[common.MessageType]()
+		shelf.RegisterMessageFactory(newTestOLobOpsFactory(test.protocol))
+		streamer := NewMessageStreamer(shelf)
+		shelf.RegisterMessageStreamer(streamer)
+		loc := newTestLobReferenceLocator(byte(test.protocol))
+		reference, err := shelf.retainLobReference(loc)
+		if err != nil {
+			t.Fatalf("protocol %d retain: %v", test.protocol, err)
+		}
+		if err := releaseLobReference(shelf, reference); err != nil {
+			t.Fatalf("protocol %d release: %v", test.protocol, err)
+		}
+		if err := streamer.Push(context.Background(), &lobRegistryOrdinaryFunction{}); err != nil {
+			t.Fatalf("protocol %d push: %v", test.protocol, err)
+		}
+		piggyback, ok := streamer.outgoingMessages.Front().Value.(*tTIlob)
+		if !ok {
+			t.Fatalf("protocol %d piggyback = %T", test.protocol, streamer.outgoingMessages.Front().Value)
+		}
+		_, extended := piggyback.header.(*ttiFunHeader18)
+		if extended != test.extended {
+			t.Fatalf("protocol %d extended header = %t, want %t", test.protocol, extended, test.extended)
+		}
+	}
+}
 
 // TestLobReferenceRegistry_RejectsRetainAfterFreeQueued verifies a queued
 // temporary- or abstract-LOB free cannot be bypassed by a later retain.
 func TestLobReferenceRegistry_RejectsRetainAfterFreeQueued(t *testing.T) {
 	t.Parallel()
 
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	loc := newTestLobReferenceLocator(18)
@@ -204,7 +244,7 @@ func TestLobReferenceRegistry_RejectsRetainAfterFreeQueued(t *testing.T) {
 func TestLobReferenceRegistry_ArrayPiggybackMarshalsWithOrdinaryFunction(t *testing.T) {
 	t.Parallel()
 
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	buffer := NewArrayDataBuffer(4096)
 	marshaller := NewMarshalEngine(buffer, common.BIG_ENDIAN, [5]byte{Native, Universal, Universal, Universal, Universal})
 	shelf.RegisterMarshaller(marshaller)
@@ -246,7 +286,7 @@ func TestLobReferenceRegistry_ArrayPiggybackMarshalsWithOrdinaryFunction(t *test
 func TestLobReferenceRegistry_PiggybackBatchesPendingLocators(t *testing.T) {
 	t.Parallel()
 
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	first := newTestLobReferenceLocator(111)
@@ -280,7 +320,7 @@ func TestLobReferenceRegistry_PiggybackBatchesPendingLocators(t *testing.T) {
 // TestLobReferenceRegistry_PiggybackMarshallingFailureRestoresPendingBatch verifies
 // a pre-transport marshal failure restores pending cleanup.
 func TestLobReferenceRegistry_PiggybackMarshallingFailureRestoresPendingBatch(t *testing.T) {
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	shelf.RegisterMarshaller(NewMarshalEngine(NewArrayDataBuffer(0), common.BIG_ENDIAN, [5]byte{Native, Universal, Universal, Universal, Universal}))
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
@@ -339,7 +379,7 @@ func TestLobReferenceRegistry_PiggybackMarshallingFailureRestoresPendingBatch(t 
 // TestLobReferenceRegistry_PiggybackTransportFailureInvalidatesAndDiscards verifies
 // an ambiguous piggyback transport failure discards session state.
 func TestLobReferenceRegistry_PiggybackTransportFailureInvalidatesAndDiscards(t *testing.T) {
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	buffer := NewArrayDataBuffer(4096)
 	buffer.returnFlushError = true
 	shelf.RegisterMarshaller(NewMarshalEngine(buffer, common.BIG_ENDIAN, [5]byte{Native, Universal, Universal, Universal, Universal}))
@@ -379,7 +419,7 @@ func TestLobReferenceRegistry_PiggybackTransportFailureInvalidatesAndDiscards(t 
 // TestLobReferenceRegistry_PiggybackIsNotRestoredAfterMainResponseFailure verifies
 // cleanup is not restored after the main response fails.
 func TestLobReferenceRegistry_PiggybackIsNotRestoredAfterMainResponseFailure(t *testing.T) {
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	buffer := NewArrayDataBuffer(4096)
 	shelf.RegisterMarshaller(NewMarshalEngine(buffer, common.BIG_ENDIAN, [5]byte{Native, Universal, Universal, Universal, Universal}))
 	streamer := NewMessageStreamer(shelf)
@@ -416,7 +456,7 @@ func TestLobReferenceRegistry_PiggybackIsNotRestoredAfterMainResponseFailure(t *
 // TestLobReferenceRegistry_PiggybackRejectsPayloadBeyondOLOBOPSLengthLimit verifies
 // oversized array-free payloads are rejected.
 func TestLobReferenceRegistry_PiggybackRejectsPayloadBeyondOLOBOPSLengthLimit(t *testing.T) {
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	loc := newTestLobReferenceLocator(124)
@@ -442,10 +482,14 @@ func TestLobReferenceRegistry_PiggybackRejectsPayloadBeyondOLOBOPSLengthLimit(t 
 // TestLobReferenceRegistry_PiggybackPreservesExistingPiggybackOrdering verifies an
 // existing piggyback remains before the temporary-free piggyback.
 func TestLobReferenceRegistry_PiggybackPreservesExistingPiggybackOrdering(t *testing.T) {
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
-	otherPiggyback := newTTIlobPiggyback().(*tTIlob)
+	message, err := shelf.GetMessageFactory().GetMessageForFunction(TTIPFN, oLobOps)
+	if err != nil {
+		t.Fatalf("create existing piggyback: %v", err)
+	}
+	otherPiggyback := message.(*tTIlob)
 	if err := streamer.Push(context.Background(), otherPiggyback); err != nil {
 		t.Fatalf("Push existing piggyback: %v", err)
 	}
@@ -481,7 +525,7 @@ func TestLobReferenceRegistry_PiggybackPreservesExistingPiggybackOrdering(t *tes
 func TestLobReferenceRegistry_LogoffDiscardsPendingFree(t *testing.T) {
 	t.Parallel()
 
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	loc := newTestLobReferenceLocator(89)
@@ -516,7 +560,7 @@ func TestLobReferenceRegistry_LogoffDiscardsPendingFree(t *testing.T) {
 func TestLobReferenceRegistry_LogoffRemovesQueuedFree(t *testing.T) {
 	t.Parallel()
 
-	shelf := newShelf[common.MessageType]()
+	shelf := newLobRegistryTestShelf()
 	streamer := NewMessageStreamer(shelf)
 	shelf.RegisterMessageStreamer(streamer)
 	loc := newTestLobReferenceLocator(90)
