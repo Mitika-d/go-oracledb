@@ -186,6 +186,7 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestDriver_LobStreamingReadLOBs", Categories: "functional", Exclusive: false, Fn: TestDriver_LobStreamingReadLOBs},
 	{Name: "TestDriver_LobStreamingReadMultipleBLOBColumns", Categories: "functional", Exclusive: false, Fn: TestDriver_LobStreamingReadMultipleBLOBColumns},
 	{Name: "TestDriver_LobPrefetchMaterializesSmallerValue", Categories: "functional", Exclusive: false, Fn: TestDriver_LobPrefetchMaterializesSmallerValue},
+	{Name: "TestDriver_LobMaterializesPastPrefetch", Categories: "functional", Exclusive: false, Fn: TestDriver_LobMaterializesPastPrefetch},
 	{Name: "TestDriver_LobStreamingReadExceedsPrefetch", Categories: "functional", Exclusive: false, Fn: TestDriver_LobStreamingReadExceedsPrefetch},
 	{Name: "TestDriver_LobTextMaterializesPastPrefetch", Categories: "functional", Exclusive: false, Fn: TestDriver_LobTextMaterializesPastPrefetch},
 	{Name: "TestDriver_LobLocatorOperations", Categories: "functional", Exclusive: false, Fn: TestDriver_LobLocatorOperations},

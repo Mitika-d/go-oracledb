@@ -292,7 +292,7 @@ func TestTTILobRpa_UnMarshalFrom_Success(t *testing.T) {
 					sourceLocator:      &locator{locatorBytes: make(common.B1Array, 108)},
 					destinationLocator: nil,
 					charsetID:          873,
-					sendLobAmt:         true,
+					sendLobAmt:         false,
 					nullO2U:            true,
 					operation:          kplobTmpCreate,
 				}
@@ -301,8 +301,8 @@ func TestTTILobRpa_UnMarshalFrom_Success(t *testing.T) {
 				sourceLocatorLen: intPtr(40),
 				sourceLocator:    append([]byte(nil), expectedCreateSourceLocator...),
 				charsetID:        ub2Ptr(common.UB2(873)),
-				sendLobAmt:       boolPtr(true),
-				lobAmt:           ub8Ptr(common.UB8(96)),
+				sendLobAmt:       boolPtr(false),
+				lobAmt:           ub8Ptr(common.UB8(0)),
 				lobNull:          boolPtr(true),
 			},
 		},
@@ -358,6 +358,70 @@ func TestTTILobRpa_UnMarshalFrom_Success(t *testing.T) {
 			t.Parallel()
 			runLobRpaSuccessCase(t, tc)
 		})
+	}
+}
+
+// TestTTILobRpa_WriteUsesUB4ResponseAmount verifies the native OLOBOPS write
+// acknowledgement ends after its UB4 amount. Decoding it as UB8 consumes the
+// next TTC message and reproduces the live explicit-BLOB bind failure.
+func TestTTILobRpa_WriteUsesUB4ResponseAmount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	locatorBytes := common.B1Array{0, 6, 1, 2, 3, 4, 5, 6}
+	response := append(common.B1Array(nil), locatorBytes...)
+	response = append(response, 0, 4, 0, 0) // 256 KiB native UB4
+
+	buffer := NewArrayDataBuffer(len(response))
+	if err := buffer.WriteBytesWithContext(ctx, response); err != nil {
+		t.Fatalf("stage native write RPA: %v", err)
+	}
+	def := newLobDefinitionForWriteOperation(newLocator(make(common.B1Array, len(locatorBytes)), 1), 0)
+	msg := newTTILobRPA().(*ttiLobRpa)
+	if err := msg.SetDefinition(def); err != nil {
+		t.Fatalf("SetDefinition: %v", err)
+	}
+	if err := msg.UnMarshalFrom(ctx, NewNativeMarshalEngine(buffer, common.BIG_ENDIAN)); err != nil {
+		t.Fatalf("UnMarshalFrom native UB4 write response: %v", err)
+	}
+	if def.lobAmt != 256*1024 {
+		t.Fatalf("write amount = %d, want %d", def.lobAmt, 256*1024)
+	}
+	if !bytes.Equal(def.sourceLocator.locatorBytes, locatorBytes) {
+		t.Fatalf("refreshed locator = % X, want % X", def.sourceLocator.locatorBytes, locatorBytes)
+	}
+}
+
+func TestTTILobRpa_TemporaryCreateHasNoResponseAmount(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	locatorBytes := common.B1Array{0, 6, 1, 2, 3, 4, 5, 6}
+	response := append(common.B1Array(nil), locatorBytes...)
+	response = append(response, 0, 1)       // native UB2 charset ID
+	response = append(response, 0, 0, 0, 0) // native SB4 non-NULL status
+
+	buffer := NewArrayDataBuffer(len(response))
+	if err := buffer.WriteBytesWithContext(ctx, response); err != nil {
+		t.Fatalf("stage native temporary-create RPA: %v", err)
+	}
+	def := &lobDefinition{
+		sourceLocator: newLocator(make(common.B1Array, len(locatorBytes)), 1),
+		charsetID:     1,
+		lobAmt:        durationSession,
+		nullO2U:       true,
+		operation:     kplobTmpCreate,
+	}
+	msg := newTTILobRPA().(*ttiLobRpa)
+	if err := msg.SetDefinition(def); err != nil {
+		t.Fatalf("SetDefinition: %v", err)
+	}
+	if err := msg.UnMarshalFrom(ctx, NewNativeMarshalEngine(buffer, common.BIG_ENDIAN)); err != nil {
+		t.Fatalf("UnMarshalFrom temporary-create response without amount: %v", err)
+	}
+	if def.lobAmt != durationSession {
+		t.Fatalf("temporary-create request duration changed to %d", def.lobAmt)
+	}
+	if def.lobNull {
+		t.Fatal("temporary-create response reported NULL locator")
 	}
 }
 

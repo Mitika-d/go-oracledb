@@ -90,7 +90,7 @@ func TestBlobExecutor_CreateTemporaryLob(t *testing.T) {
 	}
 
 	// Step 2: stage a minimal successful TTIRPA containing a complete temporary
-	// locator, charset placeholder, returned duration, and non-NULL status.
+	// locator, charset placeholder, and non-NULL status.
 	shelf, _, dbuf := newLobTestShelf(4096)
 	wantLocator := make(driverCommon.B1Array, kolllTempWithSignature)
 	copy(wantLocator[:2], wantHeader)
@@ -177,7 +177,7 @@ func TestBlobExecutor_Write(t *testing.T) {
 	locatorBytes[koll1FlagOffset] = kolblBlobFlag
 
 	// Step 1: stage a minimal TTIRPA response containing the returned locator
-	// and byte count. The test shelf supplies the terminal successful OER.
+	// and the UB4 byte count. The test shelf supplies the terminal successful OER.
 	shelf, _, dbuf := newLobTestShelf(1024)
 	response := append(driverCommon.B1Array{byte(TTIRPA)}, locatorBytes...)
 	response = append(response, 0x01, byte(len(payload)))
@@ -387,7 +387,7 @@ var blobTempLocatorMarshalGoldenPayload = []string{
 	`"03 60 01 00 01 01 6C 00"`,
 	`"01 0A 00 00 01 00 01 02"`,
 	`"01 10 01 01 01 00 01 71"`,
-	`"01 00 00 00 00 00 00 00"`,
+	`"00 00 00 00 00 00 00 00"`,
 	`"6A 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
@@ -401,7 +401,7 @@ var blobTempLocatorMarshalGoldenPayload = []string{
 	`"00 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
 	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 01 01 01 01 01 0A"`,
+	`"00 00 00 01 01 01 01"`,
 }
 
 // blobWriteMarshalGoldenPayload is the complete OLOBOPS plus TTILOBD request

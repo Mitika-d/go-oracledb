@@ -66,7 +66,7 @@ func TestDriver_LobStreamingReadLOBs(t *testing.T) {
 		t.Skip("No configuration available")
 	}
 
-	db, err := openTestDBWithConfig(TestingConfig)
+	db, err := openStreamingTestDBWithConfig(TestingConfig)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestDriver_LobStreamingReadMultipleBLOBColumns(t *testing.T) {
 		t.Skip("No configuration available")
 	}
 
-	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize)
+	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize, true)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestDriver_LobPrefetchMaterializesSmallerValue(t *testing.T) {
 		t.Skip("No configuration available")
 	}
 
-	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize)
+	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize, false)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -277,6 +277,45 @@ func TestDriver_LobPrefetchMaterializesSmallerValue(t *testing.T) {
 	}
 }
 
+// TestDriver_LobMaterializesPastPrefetch verifies that compatibility mode
+// continues reading a BLOB after its prefetched prefix and returns []byte.
+func TestDriver_LobMaterializesPastPrefetch(t *testing.T) {
+	if TestingConfig == nil {
+		t.Skip("No configuration available")
+	}
+
+	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize, false)
+	if err != nil {
+		t.Fatalf("open test DB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	table := createLOBObjectName(t)
+	if err := createTable(ctx, db, table, map[string]string{"id": "NUMBER PRIMARY KEY", "bin": "BLOB"}); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	t.Cleanup(func() { _ = dropTable(ctx, db, table) })
+
+	size := functionalLobPrefetchSize + 1
+	t.Logf("create and materialize %d-byte BLOB", size)
+	payload := binaryFixture(size)
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (id, bin) VALUES (:1, :2)", table), int64(1), BindBlob(payload)); err != nil {
+		t.Fatalf("insert BLOB: %v", err)
+	}
+	var value []byte
+	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT bin FROM %s WHERE id = :1", table), int64(1)).Scan(&value); err != nil {
+		t.Fatalf("scan materialized BLOB: %v", err)
+	}
+	if len(value) != size {
+		t.Fatalf("materialized BLOB length = %d, want %d", len(value), size)
+	}
+	if gotDigest, wantDigest := sha256.Sum256(value), sha256.Sum256(payload); gotDigest != wantDigest {
+		t.Fatalf("materialized BLOB digest = %x, want %x", gotDigest, wantDigest)
+	}
+}
+
 // TestDriver_LobStreamingReadExceedsPrefetch verifies that a locator read
 // continues beyond the connection prefetch limit. Its digest is calculated
 // while reading fixed-size buffers, so the test never materializes a second
@@ -286,7 +325,7 @@ func TestDriver_LobStreamingReadExceedsPrefetch(t *testing.T) {
 		t.Skip("No configuration available")
 	}
 
-	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize)
+	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize, true)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -351,7 +390,7 @@ func TestDriver_LobTextMaterializesPastPrefetch(t *testing.T) {
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
 	}
-	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize)
+	db, err := openLobPrefetchTestDB(TestingConfig, functionalLobPrefetchSize, false)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -366,11 +405,11 @@ func TestDriver_LobTextMaterializesPastPrefetch(t *testing.T) {
 	if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (id, txt, ntxt) VALUES (:1, :2, :3)", table), int64(1), BindClob(payload), BindNClob(payload)); err != nil {
 		t.Fatalf("insert text LOBs: %v", err)
 	}
-	var clobValue, nclobValue lob.Text
+	var clobValue, nclobValue string
 	if err := db.QueryRowContext(ctx, fmt.Sprintf("SELECT txt, ntxt FROM %s WHERE id = :1", table), int64(1)).Scan(&clobValue, &nclobValue); err != nil {
 		t.Fatalf("scan text LOBs: %v", err)
 	}
-	if string(clobValue) != payload || string(nclobValue) != payload {
+	if clobValue != payload || nclobValue != payload {
 		t.Fatal("materialized text LOB mismatch")
 	}
 }
@@ -378,13 +417,16 @@ func TestDriver_LobTextMaterializesPastPrefetch(t *testing.T) {
 // openLobPrefetchTestDB opens a dedicated test connection with a small
 // prefetch threshold. This validates the same below/above-prefetch behavior
 // as the 32 MiB default without adding a multi-minute fixture to every run.
-func openLobPrefetchTestDB(cfg *TestConfig, prefetchSize int) (*sql.DB, error) {
+func openLobPrefetchTestDB(cfg *TestConfig, prefetchSize int, stream bool) (*sql.DB, error) {
 	dsn := cfg.GetConnectionString()
 	separator := "?"
 	if strings.Contains(dsn, "?") {
 		separator = "&"
 	}
 	dsn = fmt.Sprintf("%s%voracle.go.DriverProperties.DefaultLobPrefetchSize=%d", dsn, separator, prefetchSize)
+	if stream {
+		dsn += "&oracle.go.DriverProperties.StreamLobResults=true"
+	}
 	db, err := sql.Open(cfg.Driver.Name, dsn)
 	if err != nil {
 		return nil, err
@@ -405,7 +447,7 @@ func TestDriver_LobLocatorOperations(t *testing.T) {
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
 	}
-	db, err := openTestDBWithConfig(TestingConfig)
+	db, err := openStreamingTestDBWithConfig(TestingConfig)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -610,7 +652,7 @@ func TestDriver_LobDirectPersistentHandoff(t *testing.T) {
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
 	}
-	db, err := openTestDBWithConfig(TestingConfig)
+	db, err := openStreamingTestDBWithConfig(TestingConfig)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}
@@ -749,7 +791,7 @@ func TestDriver_LobDirectLifecycleRejections(t *testing.T) {
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
 	}
-	db, err := openTestDBWithConfig(TestingConfig)
+	db, err := openStreamingTestDBWithConfig(TestingConfig)
 	if err != nil {
 		t.Fatalf("open test DB: %v", err)
 	}

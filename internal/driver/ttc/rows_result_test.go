@@ -125,6 +125,7 @@ func TestRowsResult_LocatorValueSurvivesRowsNext(t *testing.T) {
 	t.Parallel()
 	rows := newTTCRows([]columnContext{{DataType: DtyBlob}})
 	rows.shelf = newShelf[common.MessageType]()
+	rows.streamLobResults = true
 	rows.sessionContext = newTestSessionContext()
 	rows.rowData = [][]common.B1Array{{common.B1Array("first")}, {common.B1Array("second")}}
 	rows.lobColumnContexts = [][]*lobColumnContext{
@@ -202,6 +203,7 @@ func TestRowsResult_ReaderModePreservesEmptyNonNullLob(t *testing.T) {
 	t.Parallel()
 	rows := newTTCRows([]columnContext{{DataType: DtyBlob}})
 	rows.shelf = newShelf[common.MessageType]()
+	rows.streamLobResults = true
 	rows.sessionContext = newTestSessionContext()
 	rows.rowData = [][]common.B1Array{{nil}}
 	locator := persistentTestLobLocator()
@@ -228,6 +230,7 @@ func TestRowsResult_ReaderModePreservesEmptyNonNullClob(t *testing.T) {
 	t.Parallel()
 	locator := persistentTestLobLocator()
 	rows := newTTCRows([]columnContext{{DataType: DtyClob}})
+	rows.streamLobResults = true
 	rows.shelf, _, _ = newExecTestShelf(1024)
 	rows.sessionContext = &common.SessionContext{}
 	rows.shelf.RegisterCodecFactory(NewCodecFactoryForProtocol(MinTTCProtocolVersion))
@@ -242,6 +245,32 @@ func TestRowsResult_ReaderModePreservesEmptyNonNullClob(t *testing.T) {
 	}
 	if _, ok := destination[0].(internallob.LOBSource); !ok {
 		t.Fatalf("empty CLOB = %#v (%T), want locator source", destination[0], destination[0])
+
+	}
+}
+
+// TestRowsResult_MaterializedModeReturnsBlobBytes verifies the default []byte
+// scan contract when the complete BLOB is prefetched in the row.
+func TestRowsResult_MaterializedModeReturnsBlobBytes(t *testing.T) {
+	t.Parallel()
+	payload := common.B1Array("blob payload")
+	locator := persistentTestLobLocator()
+	rows := newTTCRows([]columnContext{{DataType: DtyBlob}})
+	rows.shelf = newShelf[common.MessageType]()
+	rows.sessionContext = newTestSessionContext()
+	rows.rowData = [][]common.B1Array{{payload}}
+	rows.lobColumnContexts = [][]*lobColumnContext{{{
+		locatorByteLength: common.UB4(len(locator)),
+		totalLobLength:    common.UB8(len(payload)),
+		lobLocator:        locator,
+	}}}
+	destination := make([]driver.Value, 1)
+	if err := rows.Next(destination); err != nil {
+		t.Fatalf("Next returned error: %v", err)
+	}
+	value, ok := destination[0].([]byte)
+	if !ok || !bytes.Equal(value, payload) {
+		t.Fatalf("BLOB = %#v (%T), want %x", destination[0], destination[0], payload)
 	}
 }
 
@@ -553,8 +582,8 @@ func TestTTCRowsColumnTypeScanType(t *testing.T) {
 
 		{name: "RAW", dtype: DtyBin, want: reflect.TypeFor[[]byte]()},
 
-		{name: "CLOB", dtype: DtyClob, want: reflect.TypeFor[any]()},
-		{name: "BLOB", dtype: DtyBlob, want: reflect.TypeFor[any]()},
+		{name: "CLOB", dtype: DtyClob, want: reflect.TypeFor[string]()},
+		{name: "BLOB", dtype: DtyBlob, want: reflect.TypeFor[[]byte]()},
 
 		{name: "JSON", dtype: DtyJSON, want: reflect.TypeFor[string]()},
 	}
@@ -569,5 +598,11 @@ func TestTTCRowsColumnTypeScanType(t *testing.T) {
 					got, got.Kind(), tc.want, tc.want.Kind())
 			}
 		})
+	}
+
+	rows := buildTestTTCRows(true, DtyBlob, 0, nil)
+	rows.streamLobResults = true
+	if got := rows.ColumnTypeScanType(0); got != reflect.TypeFor[any]() {
+		t.Fatalf("streaming BLOB ColumnTypeScanType() = %v, want any", got)
 	}
 }

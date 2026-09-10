@@ -310,9 +310,23 @@ func init() {
 		common.Odl.Warn("Failed to register OAll8 function reply", "error", err)
 	}
 
+	err = FunctionRegistry.Register(functionRegistryKey{messageType: TTIFUN, functionType: oLobOps}, 18, newTTIlob18)
+	if err != nil {
+		common.Odl.Warn("Failed to register v18 function oLobOps", "error", err)
+	}
+
 	err = FunctionRegistry.Register(functionRegistryKey{messageType: TTIFUN, functionType: oLobOps}, MinTTCProtocolVersion, newTTIlob)
 	if err != nil {
 		common.Odl.Warn("Failed to register function oLobOps", "error", err)
+	}
+	err = FunctionRegistry.Register(functionRegistryKey{messageType: TTIPFN, functionType: oLobOps}, 18, newTTIlobPiggyback18)
+	if err != nil {
+		common.Odl.Warn("Failed to register v18 piggyback function oLobOps", "error", err)
+	}
+
+	err = FunctionRegistry.Register(functionRegistryKey{messageType: TTIPFN, functionType: oLobOps}, MinTTCProtocolVersion, newTTIlobPiggyback)
+	if err != nil {
+		common.Odl.Warn("Failed to register piggyback function oLobOps", "error", err)
 	}
 
 	err = FunctionRegistry.Register(functionRegistryKey{messageType: TTIRPA, functionType: oLobOps}, MinTTCProtocolVersion, newTTILobRPA)

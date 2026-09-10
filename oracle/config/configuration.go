@@ -73,6 +73,10 @@ type OracleDriverProperties struct {
 	//
 	// The default is 32 MiB.
 	DefaultLobPrefetchSize int `default:"33554432" validator:"validateZeroOrPositive"  help:"default prefetch size"`
+	// StreamLobResults returns BLOB, CLOB, and NCLOB query columns as
+	// locator-backed values for oracle/lob scanners. The compatibility default
+	// materializes BLOBs as []byte and character LOBs as strings.
+	StreamLobResults bool `default:"false" help:"if true, return locator-backed LOB query values"`
 }
 
 func (config OracleDriverProperties) String() string {
@@ -85,6 +89,10 @@ func (config OracleDriverProperties) IsStrictNullValueHandling() bool {
 
 func (config OracleDriverProperties) GetDefaultLobPrefetchSize() int {
 	return config.DefaultLobPrefetchSize
+}
+
+func (config OracleDriverProperties) IsLobStreamingEnabled() bool {
+	return config.StreamLobResults
 }
 
 // OracleConnectionProperties contains Oracle Net connection properties used to
@@ -396,19 +404,22 @@ func (config *OracleLoggingConfig) AssignFromEnv() error {
 
 // AssignFromFlags updates the logging configuration from command-line flags.
 //
-// AssignFromFlags considers only flags that were explicitly set by the user. For
-// each matching configuration field, it validates the flag value when the field
-// declares a validator tag, converts the value to the field type, and assigns it
-// to the config.
+// AssignFromFlags considers only flags that the embedding application has
+// already parsed and that were explicitly set by the user. The driver never
+// parses the process-wide flag set: command-line ownership remains with the
+// application. If the application has not parsed its flags, the configuration
+// is left unchanged.
 //
-// Configuration fields without a matching explicit flag are left unchanged.
+// For each matching configuration field, AssignFromFlags validates the flag
+// value when the field declares a validator tag, converts the value to the
+// field type, and assigns it to the config. Configuration fields without a
+// matching explicit flag are left unchanged.
 //
 // AssignFromFlags returns the first validation, conversion, or assignment error
 // it encounters.
 func (config *OracleLoggingConfig) AssignFromFlags() error {
-
 	if !flag.Parsed() {
-		flag.Parse()
+		return nil
 	}
 
 	// grab used flags
@@ -996,7 +1007,7 @@ func (config *OracleDriverConfig) AssignFromEnv() error {
 
 func (config *OracleDriverConfig) AssignFromFlags() error {
 	if !flag.Parsed() {
-		flag.Parse()
+		return nil
 	}
 	return config.loadFromFlags()
 }

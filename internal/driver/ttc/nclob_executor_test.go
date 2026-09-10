@@ -114,10 +114,9 @@ func TestClobExecutor_WriteNCLOB(t *testing.T) {
 	locator := make(driverCommon.B1Array, len(nclobWriteLocator))
 	copy(locator, nclobWriteLocator)
 
-	if err := dbuf.WriteByteWithContext(ctx, byte(TTIRPA)); err != nil {
-		t.Fatalf("write TTIRPA header failed: %v", err)
-	}
-	if err := dbuf.WriteBytesWithContext(ctx, makeLobPayloadFromDump(nclobWriteRPAGoldenPayload)); err != nil {
+	response := append(driverCommon.B1Array{byte(TTIRPA)}, locator...)
+	response = append(response, 0x02, 0x01, 0xA4)
+	if err := dbuf.WriteBytesWithContext(ctx, response); err != nil {
 		t.Fatalf("write oLobOps RPA (Write) payload failed: %v", err)
 	}
 	marshalWritePosition := dbuf.currentWritePosition
@@ -315,8 +314,7 @@ var nclobWriteMarshalGoldenPayload = []string{
 	`"56 EA 00 00 00 40 00 00"`,
 	`"00 01 07 D0 00 0A 00 00"`,
 	`"00 01 00 00 35 D6 95 F5"`,
-	`"00 00 00 01 00 00 02 01"`,
-	`"A4 0E FE 02 03 48 30 53"`,
+	`"00 00 00 01 00 00 02 01 A4 0E FE 02 03 48 30 53"`,
 	`"30 93 30 6B 30 61 30 6F"`,
 	`"00 20 20 13 00 20 09 28"`,
 	`"09 2E 09 38 09 4D 09 24"`,
@@ -422,20 +420,6 @@ var nclobWriteMarshalGoldenPayload = []string{
 	`"00 20 20 13 00 20 4F 60"`,
 	`"59 7D 00 20 20 13 00 20"`,
 	`"D8 3D DE 00 00 20 00"`,
-}
-
-var nclobWriteRPAGoldenPayload = []string{
-	`"00 26 00 01 84"`,
-	`"48 00 03 00 02 56 EA 00"`,
-	`"00 00 40 00 00 00 01 07"`,
-	`"D0 00 0A 00 00 00 01 00"`,
-	`"00 35 D6 95 F5 00 00 00"`,
-	`"01 00 00 02 01 A4 04 01"`,
-	`"01 01 08 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00 00 00 00 00 00 08 00"`,
-	`"00 00 00 00 00 00 00 00"`,
-	`"00"`,
 }
 
 var nclobWriteLocator = driverCommon.B1Array{
