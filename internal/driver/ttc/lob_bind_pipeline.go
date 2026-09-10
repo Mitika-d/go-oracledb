@@ -651,6 +651,7 @@ func encodeLobLocatorBind(bind lobLocatorBind) (driverCommon.B1Array, driverComm
 	// Return an independent locator payload because later cleanup mutates the
 	// temporary locator's local flags.
 	oac := newTTIoac(dtype, max_lob_length)
+	oac.flagsContinuation = uacflsz
 	oac.characterSetForm = bind.charsetForm
 	oac.characterSetID = bind.charsetID
 	return append(driverCommon.B1Array(nil), bind.locator...), oac, nil

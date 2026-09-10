@@ -482,8 +482,8 @@ func TestLobBindPipeline_EncodeLobLocatorBindUsesLobOAC(t *testing.T) {
 		t.Fatalf("encodeLobLocatorBind returned error: %v", err)
 	}
 	oac := marshalled.(*tTIoac)
-	if string(encoded) != "locator" || DtyType(oac.dataType) != DtyClob || oac.characterSetForm != FormNChar || oac.characterSetID != al16Utf16CharSet {
-		t.Fatalf("encoded=%q oac=%+v, want NCLOB locator metadata", encoded, oac)
+	if string(encoded) != "locator" || DtyType(oac.dataType) != DtyClob || oac.characterSetForm != FormNChar || oac.characterSetID != al16Utf16CharSet || oac.flagsContinuation != uacflsz {
+		t.Fatalf("encoded=%q oac=%+v, want NCLOB locator metadata with LOB size flag", encoded, oac)
 	}
 	if _, _, err := encodeLobLocatorBind(lobLocatorBind{}); err == nil {
 		t.Fatal("encodeLobLocatorBind accepted an empty locator")
