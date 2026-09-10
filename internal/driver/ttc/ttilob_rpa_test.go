@@ -292,7 +292,7 @@ func TestTTILobRpa_UnMarshalFrom_Success(t *testing.T) {
 					sourceLocator:      &locator{locatorBytes: make(common.B1Array, 108)},
 					destinationLocator: nil,
 					charsetID:          873,
-					sendLobAmt:         true,
+					sendLobAmt:         false,
 					nullO2U:            true,
 					operation:          kplobTmpCreate,
 				}
@@ -301,8 +301,8 @@ func TestTTILobRpa_UnMarshalFrom_Success(t *testing.T) {
 				sourceLocatorLen: intPtr(40),
 				sourceLocator:    append([]byte(nil), expectedCreateSourceLocator...),
 				charsetID:        ub2Ptr(common.UB2(873)),
-				sendLobAmt:       boolPtr(true),
-				lobAmt:           ub8Ptr(common.UB8(96)),
+				sendLobAmt:       boolPtr(false),
+				lobAmt:           ub8Ptr(common.UB8(0)),
 				lobNull:          boolPtr(true),
 			},
 		},
@@ -391,14 +391,13 @@ func TestTTILobRpa_WriteUsesUB4ResponseAmount(t *testing.T) {
 	}
 }
 
-func TestTTILobRpa_TemporaryCreateUsesUB8ResponseAmount(t *testing.T) {
+func TestTTILobRpa_TemporaryCreateHasNoResponseAmount(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	locatorBytes := common.B1Array{0, 6, 1, 2, 3, 4, 5, 6}
 	response := append(common.B1Array(nil), locatorBytes...)
-	response = append(response, 0, 1)                    // native UB2 charset ID
-	response = append(response, 0, 0, 0, 0, 0, 0, 0, 10) // native UB8 returned duration
-	response = append(response, 0, 0, 0, 0)              // native SB4 non-NULL status
+	response = append(response, 0, 1)       // native UB2 charset ID
+	response = append(response, 0, 0, 0, 0) // native SB4 non-NULL status
 
 	buffer := NewArrayDataBuffer(len(response))
 	if err := buffer.WriteBytesWithContext(ctx, response); err != nil {
@@ -407,7 +406,7 @@ func TestTTILobRpa_TemporaryCreateUsesUB8ResponseAmount(t *testing.T) {
 	def := &lobDefinition{
 		sourceLocator: newLocator(make(common.B1Array, len(locatorBytes)), 1),
 		charsetID:     1,
-		sendLobAmt:    true,
+		lobAmt:        durationSession,
 		nullO2U:       true,
 		operation:     kplobTmpCreate,
 	}
@@ -416,10 +415,10 @@ func TestTTILobRpa_TemporaryCreateUsesUB8ResponseAmount(t *testing.T) {
 		t.Fatalf("SetDefinition: %v", err)
 	}
 	if err := msg.UnMarshalFrom(ctx, NewNativeMarshalEngine(buffer, common.BIG_ENDIAN)); err != nil {
-		t.Fatalf("UnMarshalFrom temporary-create UB8 response: %v", err)
+		t.Fatalf("UnMarshalFrom temporary-create response without amount: %v", err)
 	}
-	if def.lobAmt != 10 {
-		t.Fatalf("temporary-create response amount = %d, want 10", def.lobAmt)
+	if def.lobAmt != durationSession {
+		t.Fatalf("temporary-create request duration changed to %d", def.lobAmt)
 	}
 	if def.lobNull {
 		t.Fatal("temporary-create response reported NULL locator")

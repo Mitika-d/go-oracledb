@@ -454,11 +454,14 @@ func newLobDefinitionForTemporaryCreate(
 		destinationLocator: newLocator(nil, lobType),
 		destinationLength:  common.SB4(duration),
 		lobAmt:             common.UB8(duration),
-		sendLobAmt:         true,
-		nullO2U:            true, // cacheFlag is sent as lobnull
-		operation:          kplobTmpCreate,
-		charsetID:          charsetID,
-		lobscn:             []common.UB4{cacheFlag},
+		// Temporary-create receives its duration through destinationLength.
+		// Requesting lobamt makes the server emit a response field this operation
+		// does not consume, desynchronizing the next TTC message.
+		sendLobAmt: false,
+		nullO2U:    true, // cacheFlag is sent as lobnull
+		operation:  kplobTmpCreate,
+		charsetID:  charsetID,
+		lobscn:     []common.UB4{cacheFlag},
 	}
 
 	def.lobscnl = common.SB4(len(def.lobscn))

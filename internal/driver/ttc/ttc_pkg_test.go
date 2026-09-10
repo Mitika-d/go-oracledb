@@ -704,7 +704,7 @@ var testCases = []struct {
 	{"TestTTILobRpa_UnMarshalFrom_Failure", "unitary", false, TestTTILobRpa_UnMarshalFrom_Failure},
 	{"TestTTILobRpa_UnMarshalFrom_Success", "unitary", false, TestTTILobRpa_UnMarshalFrom_Success},
 	{"TestTTILobRpa_WriteUsesUB4ResponseAmount", "unitary", false, TestTTILobRpa_WriteUsesUB4ResponseAmount},
-	{"TestTTILobRpa_TemporaryCreateUsesUB8ResponseAmount", "unitary", false, TestTTILobRpa_TemporaryCreateUsesUB8ResponseAmount},
+	{"TestTTILobRpa_TemporaryCreateHasNoResponseAmount", "unitary", false, TestTTILobRpa_TemporaryCreateHasNoResponseAmount},
 	{"TestTTILobd_MarshalTo_Fail", "unitary", false, TestTTILobd_MarshalTo_Fail},
 	{"TestTTILobd_MarshalTo_Success", "unitary", false, TestTTILobd_MarshalTo_Success},
 	{"TestTTILobd_UnMarshalFrom_Fail", "unitary", false, TestTTILobd_UnMarshalFrom_Fail},
