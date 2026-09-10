@@ -302,7 +302,7 @@ func TestTTILobRpa_UnMarshalFrom_Success(t *testing.T) {
 				sourceLocator:    append([]byte(nil), expectedCreateSourceLocator...),
 				charsetID:        ub2Ptr(common.UB2(873)),
 				sendLobAmt:       boolPtr(true),
-				lobAmt:           ub8Ptr(common.UB8(96)),
+				lobAmt:           ub8Ptr(common.UB8(0)),
 				lobNull:          boolPtr(true),
 			},
 		},
