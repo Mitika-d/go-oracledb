@@ -516,6 +516,19 @@ func (l *locator) hasBytes() bool {
 	return l.locatorBytes != nil
 }
 
+// markReleased clears all local temporary-locator state: abstract, initialized,
+// temporary, open, and read/write flags. Call it only after
+// lobReferenceRegistry.release succeeds. The registry schedules a server free only
+// when the final local owner is released.
+func (l *locator) markReleased() {
+	if l == nil || len(l.locatorBytes) <= koll4FlagOffset {
+		return
+	}
+	l.locatorBytes[koll1FlagOffset] &^= kolblAbstractLocatorFlag
+	l.locatorBytes[koll2FlagOffset] &^= kolblInitializedFlag
+	l.locatorBytes[koll4FlagOffset] &^= kolblTemporaryFlagByte | kolblOpenFlagByte | kolblReadWriteFlagByte
+}
+
 // isTemporaryLocator reports whether the provided locator references a temporary
 // LOB by inspecting the temporary flag stored in the koll4 offset.
 func (l *locator) isTemporaryLocator() bool {

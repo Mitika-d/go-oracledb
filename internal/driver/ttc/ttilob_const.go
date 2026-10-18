@@ -38,14 +38,17 @@
 
 package ttc
 
+import internallob "github.com/oracle/go-oracledb/v26/internal/lob"
+
 // This file groups reusable constants related to TTC LOB locators. The layout roughly
 // follows the lifecycle of a locator: binary layout, flag semantics, high-level modes,
 // character-set hints, and finally temporary LOB handling constants.
 
 // DefaultCharacterLobChunkChars is the bounded text chunk capacity used by
 // CLOB/NCLOB reads and streamed character binds. Locator amounts for character
-// LOBs remain measured in UTF-16 code units.
-const DefaultCharacterLobChunkChars = 32 * 1024
+// LOBs remain measured in UTF-16 code units. The shared value lives in internal/lob
+// so public typed handles and TTC use the same chunk capacity.
+const DefaultCharacterLobChunkChars = internallob.DefaultCharacterLobChunkChars
 
 // -----------------------------------------------------------------------------
 // Locator layout and structural limits
@@ -57,6 +60,15 @@ const (
 	kolbLocatorLengthHeaderBytes = 2
 	// kolbVersionOffset is the byte offset of the locator version (KOLBLVSNB).
 	kolbVersionOffset = 2
+	// kolbLobIDOffset is the byte offset at which the stable LOB identity begins
+	// in a locator. It is used to reference-count temporary and abstract locators.
+	kolbLobIDOffset = 10
+	// kolbLobIDLength is the number of bytes in the stable identity at
+	// locator[kolbLobIDOffset : kolbLobIDOffset+kolbLobIDLength]. Flags and
+	// signatures outside this range are mutable and are excluded from the
+	// reference-count key.
+	kolbLobIDLength = 10
+
 	// Offset of the flags in the locator (KOLL* values mirror koll.h definitions).
 	koll1FlagOffset = 0x04
 	koll2FlagOffset = koll1FlagOffset + 1

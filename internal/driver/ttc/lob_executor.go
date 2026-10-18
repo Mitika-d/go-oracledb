@@ -46,9 +46,10 @@ import (
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
 
-// operationError wraps a failed LOB transport stage. The caller treats a
-// LobExecError as an unsafe exchange and abandons the physical connection.
-func (e *lobExecutor) operationError(_ context.Context, err error, stage string) error {
+// wrapOperationError classifies a failed LOB transport stage. Callers
+// conservatively abandon the physical connection after an RPC error because
+// the error does not carry response-completion state.
+func wrapLobOperationError(err error, stage string) error {
 	return common.NewOracleError(oracleErrors.LobExecError, err, stage)
 }
 
@@ -433,13 +434,13 @@ func (e *lobExecutor) execute(ctx context.Context, lobDefinition *lobDefinition)
 
 	if err := e._pushLobRequest(ctx, lobDefinition); err != nil {
 		common.Odl.Error("lobExecutor.execute: push lob request failed", "error", err)
-		return e.operationError(ctx, err, "push")
+		return wrapLobOperationError(err, "push")
 	}
 	common.Odl.Fine("lobExecutor.execute: pushed lob request")
 
 	if err := stmr.Flush(ctx); err != nil {
 		common.Odl.Error("lobExecutor.execute: Flush failed", "error", err)
-		return e.operationError(ctx, err, "flush")
+		return wrapLobOperationError(err, "flush")
 	}
 	common.Odl.Fine("lobExecutor.execute: flush completed")
 
@@ -474,13 +475,13 @@ func (e *lobExecutor) executeRead(ctx context.Context, lobDefinition *lobDefinit
 
 	if err := e._pushLobRequest(ctx, lobDefinition); err != nil {
 		common.Odl.Error("lobExecutor.executeRead: push lob request failed", "error", err)
-		return e.operationError(ctx, err, "push")
+		return wrapLobOperationError(err, "push")
 	}
 	common.Odl.Fine("lobExecutor.executeRead: pushed lob request")
 
 	if err := stmr.Flush(ctx); err != nil {
 		common.Odl.Error("lobExecutor.executeRead: Flush failed", "error", err)
-		return e.operationError(ctx, err, "flush")
+		return wrapLobOperationError(err, "flush")
 	}
 	common.Odl.Fine("lobExecutor.executeRead: flush completed")
 
@@ -509,7 +510,7 @@ func (e *lobExecutor) executeWrite(ctx context.Context, lobDefinition *lobDefini
 
 	if err := e._pushLobRequest(ctx, lobDefinition); err != nil {
 		common.Odl.Error("lobExecutor.executeWrite: push lob request failed", "error", err)
-		return e.operationError(ctx, err, "push")
+		return wrapLobOperationError(err, "push")
 	}
 	common.Odl.Fine("lobExecutor.executeWrite: pushed lob request")
 
@@ -517,13 +518,13 @@ func (e *lobExecutor) executeWrite(ctx context.Context, lobDefinition *lobDefini
 	// Non-write verbs (read/metadata) bypass this path because no client data needs to be transmitted.
 	if err := e._pushWritePayload(ctx, buffer); err != nil {
 		common.Odl.Error("lobExecutor.executeWrite: push write payload failed", "error", err)
-		return e.operationError(ctx, err, "push-data")
+		return wrapLobOperationError(err, "push-data")
 	}
 	common.Odl.Fine("lobExecutor.executeWrite: pushed write payload", "payloadLength", len(buffer))
 
 	if err := stmr.Flush(ctx); err != nil {
 		common.Odl.Error("lobExecutor.executeWrite: Flush failed", "error", err)
-		return e.operationError(ctx, err, "flush")
+		return wrapLobOperationError(err, "flush")
 	}
 	common.Odl.Fine("lobExecutor.executeWrite: flush completed")
 
@@ -616,7 +617,7 @@ func (e *lobExecutor) _consumeLobResponses(ctx context.Context) error {
 		msg, err := stmr.Pull(ctx, TTILOBD, TTIRPA, TTIOER, TTISTA)
 		if err != nil {
 			common.Odl.Error("lobExecutor.consumeLobResponses: Pull failed", "error", err)
-			return e.operationError(ctx, err, "pull")
+			return wrapLobOperationError(err, "pull")
 		}
 
 		switch msg.GetMsgCode() {
