@@ -342,9 +342,6 @@ func (c *clobExecutor) write(
 ) (driverCommon.UB8, error) {
 	// validateLobOperation ensures mutating operations honor locator capabilities.
 	if err := validateLobOperation(lobLocator, kplobWrite); err != nil {
-		common.Odl.Error("clobExecutor.write: validateLobOperation failed",
-			"error", err,
-		)
 		return 0, err
 	}
 
@@ -989,32 +986,25 @@ func (c *clobExecutor) decodeFixedWidthCharSet(
 		return c.decodeVariableWidthCharSet(source, charOutBuffer, offsetInOutBuffer, littleEndian)
 	}
 
-	decoded := []rune(string(source))
-	if offsetInOutBuffer+len(decoded) > len(charOutBuffer) {
+	count := utf8.RuneCount(source)
+	if offsetInOutBuffer+count > len(charOutBuffer) {
 		return 0, common.NewOracleError(
 			oracleErrors.InvalidLOBBuffer,
 			nil,
 			"read",
 			"clob",
-			fmt.Sprintf("output buffer too small: need %d runes", len(decoded)),
+			fmt.Sprintf("output buffer too small: need %d runes", count),
 		)
 	}
 
-	copy(charOutBuffer[offsetInOutBuffer:], decoded)
-
-	// Ensure invalid UTF-8 sequences produce a replacement rune instead of silently dropping bytes.
-	// Iterating with DecodeRune guarantees progress even when source contains malformed UTF-8.
-	count := len(decoded)
-	if !utf8.Valid(source) {
-		// Re-count using explicit decoding so callers receive the number of runes actually written,
-		// which includes replacement runes for invalid sequences.
-		count = 0
-		tmp := source
-		for len(tmp) > 0 {
-			_, size := utf8.DecodeRune(tmp)
-			count++
-			tmp = tmp[size:]
-		}
+	// Decode directly into the caller's buffer to avoid temporary string and rune
+	// slices. DecodeRune advances by one byte for malformed sequences and returns
+	// RuneError, matching Go's []rune(string(source)) replacement behavior.
+	for len(source) > 0 {
+		r, size := utf8.DecodeRune(source)
+		charOutBuffer[offsetInOutBuffer] = r
+		offsetInOutBuffer++
+		source = source[size:]
 	}
 
 	return count, nil

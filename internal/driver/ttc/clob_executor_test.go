@@ -46,6 +46,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
@@ -496,7 +497,6 @@ func TestClobExecutor_CharacterConversionHelpers(t *testing.T) {
 			}
 		})
 	}
-
 	for _, test := range []struct {
 		name string
 		call func() (int, int, int)
@@ -533,7 +533,6 @@ func TestClobExecutor_CharacterConversionHelpers(t *testing.T) {
 			}
 		})
 	}
-
 	for _, test := range []struct {
 		name   string
 		data   []byte
@@ -572,6 +571,8 @@ func TestClobExecutor_CharacterConversionHelpers(t *testing.T) {
 	}{
 		{name: "fixed UTF-8", data: []byte("A🙂"), want: []rune("A🙂")},
 		{name: "fixed malformed UTF-8", data: []byte{0xFF}, want: []rune(string([]byte{0xEF, 0xBF, 0xBD}))},
+		{name: "fixed valid replacement rune", data: []byte("�"), want: []rune("�")},
+		{name: "fixed multiple malformed bytes", data: []byte{0xE2, 0x28, 0xA1}, want: []rune{utf8.RuneError, '(', utf8.RuneError}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			out := make([]rune, len(test.want))
@@ -580,6 +581,10 @@ func TestClobExecutor_CharacterConversionHelpers(t *testing.T) {
 				t.Fatalf("decodeFixedWidthCharSet = (%q, %d, %v), want (%q, %d, nil)", string(out), count, err, string(test.want), len(test.want))
 			}
 		})
+	}
+	offsetOutput := []rune{'x', 0, 0}
+	if count, err := executor.decodeFixedWidthCharSet([]byte("A🙂"), offsetOutput, 1, false, false); err != nil || count != 2 || !reflect.DeepEqual(offsetOutput, []rune("xA🙂")) {
+		t.Fatalf("decodeFixedWidthCharSet with offset = (%q, %d, %v), want (%q, 2, nil)", string(offsetOutput), count, err, "xA🙂")
 	}
 
 	for _, test := range []struct {
@@ -612,6 +617,13 @@ func TestClobExecutor_CharacterConversionHelpers(t *testing.T) {
 		t.Fatal("decodeFixedWidthCharSet accepted an undersized output buffer")
 	} else {
 		requireErrorCode(t, err, oracleErrors.InvalidLOBBuffer)
+	}
+	unchanged := []rune{'x'}
+	if _, err := executor.decodeFixedWidthCharSet([]byte("A🙂"), unchanged, 0, false, false); err == nil {
+		t.Fatal("decodeFixedWidthCharSet accepted an undersized output buffer")
+	}
+	if unchanged[0] != 'x' {
+		t.Fatalf("undersized output buffer was partially modified: %q", string(unchanged))
 	}
 	if got := writeUTF16ToBuffer([]uint16{1}, make([]byte, 1), false); got != -1 {
 		t.Fatalf("short UTF-16 write = %d, want -1", got)

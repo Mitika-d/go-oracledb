@@ -177,8 +177,8 @@ type lobDefinition struct {
 	// read-only requests this can remain empty.
 	destinationLocator *locator
 
-	// lobAmt conveys the number of bytes/characters to transfer. Some operations request the
-	// amount while others may use it to report results.
+	// lobAmt conveys the amount to transfer or report: bytes for BLOBs and UTF-16 code units for
+	// CLOBs and NCLOBs.
 	lobAmt common.UB8
 
 	// charsetID identifies the character set to interpret the payload when the LOB represents
@@ -514,6 +514,19 @@ func (l *locator) offsetForLog() common.UB8 {
 // hasBytes reports whether the locator contains a byte slice.
 func (l *locator) hasBytes() bool {
 	return l.locatorBytes != nil
+}
+
+// markReleased clears all local temporary-locator state: abstract, initialized,
+// temporary, open, and read/write flags. Call it only after
+// lobReferenceRegistry.Release succeeds. The registry schedules a server free only
+// when the final local owner is released.
+func (l *locator) markReleased() {
+	if l == nil || len(l.locatorBytes) <= koll4FlagOffset {
+		return
+	}
+	l.locatorBytes[koll1FlagOffset] &^= kolblAbstractLocatorFlag
+	l.locatorBytes[koll2FlagOffset] &^= kolblInitializedFlag
+	l.locatorBytes[koll4FlagOffset] &^= kolblTemporaryFlagByte | kolblOpenFlagByte | kolblReadWriteFlagByte
 }
 
 // isTemporaryLocator reports whether the provided locator references a temporary
