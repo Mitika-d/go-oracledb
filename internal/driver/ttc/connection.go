@@ -51,6 +51,7 @@ import (
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
+	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
 	"github.com/oracle/go-oracledb/v26/oracle/datatype"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
@@ -297,6 +298,19 @@ func (c *connection) CheckNamedValue(nv *driver.NamedValue) error {
 // checkNamedValue validates sql.Out destinations and returns shelf-localized
 // Oracle errors for binding problems.
 func checkNamedValue(nv *driver.NamedValue) error {
+	// Preserve typed LOB locators until statement binding can validate their
+	// owning session and encode them through the registered LOB bind codec.
+	switch value := nv.Value.(type) {
+	case internallob.LOBLocatorBindValue:
+		return nil
+	case internallob.LOBLocatorBindValueProvider:
+		bindValue, err := value.DriverLOBLocatorBindValue()
+		if err != nil {
+			return err
+		}
+		nv.Value = bindValue
+		return nil
+	}
 	// connectionWrapper.Fetch passes an already-decoded driver.Rows to the internal
 	// REF CURSOR statement executor. This is not a REF CURSOR OUT-bind destination.
 	if _, ok := nv.Value.(driver.Rows); ok {

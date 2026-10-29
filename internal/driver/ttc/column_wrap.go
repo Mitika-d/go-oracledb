@@ -70,3 +70,24 @@ func wrapCLRColumn(ctx context.Context, mar driverCommon.Marshaller, payload dri
 	}
 	return nil
 }
+
+// wrapLOBLocatorColumn writes the TTC byte length and CLR representation used
+// by LOB locator binds.
+func wrapLOBLocatorColumn(ctx context.Context, mar driverCommon.Marshaller, payload driverCommon.B1Array) error {
+	if payload == nil {
+		if err := mar.MarshalUB1(ctx, driverCommon.UB1(0)); err != nil {
+			common.Odl.Error("wrapLOBLocatorColumn: failed to write null length indicator", "error", err, "stage", "null-indicator")
+			return common.NewOracleError(oracleErrors.FailMarshal, err)
+		}
+		return nil
+	}
+	if err := mar.MarshalUB4(ctx, driverCommon.UB4(len(payload))); err != nil {
+		common.Odl.Error("wrapLOBLocatorColumn: failed to write locator length", "error", err, "stage", "locator-length")
+		return common.NewOracleError(oracleErrors.FailMarshal, err)
+	}
+	if err := mar.MarshalCLR(ctx, payload, 0, len(payload)); err != nil {
+		common.Odl.Error("wrapLOBLocatorColumn: failed to write locator CLR", "error", err, "stage", "locator-clr")
+		return common.NewOracleError(oracleErrors.FailMarshal, err)
+	}
+	return nil
+}

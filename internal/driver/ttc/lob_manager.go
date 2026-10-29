@@ -381,3 +381,27 @@ func validateTTCLobKindAndLocator(kind internallob.Kind, loc *locator) error {
 	}
 	return validateTTCLobLocator(loc)
 }
+
+// bindLOBLocatorValue converts a caller-owned locator into TTC bind metadata.
+// The locator must belong to this physical session; the caller retains its
+// lifetime after statement execution.
+func (m *lobManager) bindLOBLocatorValue(value internallob.LOBLocatorBindValue) (lobLocatorBind, error) {
+	if value.SessionKey != m.shelf || len(value.Locator) == 0 || !internallob.ValidKind(value.Kind) {
+		return lobLocatorBind{}, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB locator connection or metadata")
+	}
+	locator := append(driverCommon.B1Array(nil), value.Locator...)
+	bind := lobLocatorBind{locator: locator, kind: value.Kind}
+	switch value.Kind {
+	case internallob.CLOB:
+		if len(locator) <= koll3FlagOffset {
+			return lobLocatorBind{}, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "CLOB locator")
+		}
+		locator[koll3FlagOffset] |= kolblVaryingWidthFlag
+		bind.charsetForm = driverCommon.UB1(FormChar)
+		bind.charsetID = m.sessionCtx.DriverCharacterSet()
+	case internallob.NCLOB:
+		bind.charsetForm = driverCommon.UB1(FormNChar)
+		bind.charsetID = m.sessionCtx.SessionNCharCharacterSet()
+	}
+	return bind, nil
+}

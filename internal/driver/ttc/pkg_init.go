@@ -826,6 +826,10 @@ func init() {
 	if err := EncoderRegistry.Register(encoderKey{goType: reflect.TypeOf([]byte(nil))}, MinTTCProtocolVersion, newCLRBindEncoder(converters.EncodeBinary)); err != nil {
 		common.Odl.Warn("Failed to register []byte encoder", "error", err)
 	}
+	if err := EncoderRegistry.Register(encoderKey{goType: reflect.TypeOf(lobLocatorBind{})}, MinTTCProtocolVersion,
+		newTypeEncoder(encodeLOBLocatorBind, wrapLOBLocatorColumn)); err != nil {
+		common.Odl.Warn("Failed to register LOB locator encoder", "error", err)
+	}
 
 	if err := EncoderRegistry.Register(encoderKey{goType: reflect.TypeOf(nil)}, MinTTCProtocolVersion, newCLRBindEncoder(converters.EncodeNull)); err != nil {
 		common.Odl.Warn("Failed to register nil encoder", "error", err)
@@ -1021,6 +1025,14 @@ func init() {
 	}
 	if err := BindOacRegistry.Register(reflect.TypeOf([]byte(nil)), MinTTCProtocolVersion, bindOacType{bindOacFunc: newTTIOacBytes, maxLength: 32767}); err != nil {
 		common.Odl.Warn("Failed to register []byte bind OAC", "error", err)
+	}
+	// All LOB kinds share one private Go bind type. createMessages adjusts this
+	// base BLOB OAC to the locator's kind and session character set.
+	if err := BindOacRegistry.Register(reflect.TypeOf(lobLocatorBind{}), MinTTCProtocolVersion, bindOacType{
+		bindOacFunc: func(driverCommon.UB4) driverCommon.Marshallable { return newTTIoac(DtyBlob, max_lob_length) },
+		maxLength:   max_lob_length,
+	}); err != nil {
+		common.Odl.Warn("Failed to register LOB locator bind OAC", "error", err)
 	}
 
 	if err := BindOacRegistry.Register(reflect.TypeOf(nil), MinTTCProtocolVersion, bindOacType{bindOacFunc: func(driverCommon.UB4) driverCommon.Marshallable { return newTTIOacNull() }, maxLength: converters.MaxNullLength}); err != nil {
