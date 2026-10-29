@@ -50,6 +50,7 @@ import (
 tTIrxd provides unmarshalling support for TTC RXD protocol messages, which represent plain result set rows
 delivered by the network. This struct receives RXD packets, parses columns per protocol (including column-carry logic for BVC),
 and retains raw wire bytes or constructed values together with their LOB metadata.
+It also marshals outgoing bind rows.
 */
 type tTIrxd struct {
 	// numberOfColumns is the expected number of columns for each incoming RXD row.
@@ -70,8 +71,8 @@ type tTIrxd struct {
 	// bvcFound is true if BVC/column-carry logic applies to the current row (if bvcColSent has any set columns).
 	bvcFound bool
 
-	// Outgoing bind payload for TTIRXD when marshalling bind values (Phase 1: single row binds).
-	bindRow        []driverCommon.B1Array
+	// bindRow holds outgoing bind payloads for one TTIRXD row.
+	bindRow        []encodedBind
 	columnContexts []columnContext
 
 	numberOfReturningPositions int
@@ -82,7 +83,17 @@ type tTIrxd struct {
 	sessNCharSet driverCommon.UB2
 }
 
+// encodedBind is one TTC-ready SQL bind value. A temporary LOB locator uses a
+// distinct RXD representation: its TTC UB4 byte length precedes its CLR bytes.
+type encodedBind struct {
+	// data contains the bind's encoded TTC bytes.
+	data driverCommon.B1Array
+	// lobLocator selects the length-prefixed framing used for locator binds.
+	lobLocator bool
+}
+
 // newTTIrxd instantiates a TTIrxd struct configured to decode plain RXD resultset messages from Oracle's TTC protocol.
+// It also supports encoding outgoing bind rows.
 func newTTIrxd() driverCommon.Message[driverCommon.MessageType] {
 	return &tTIrxd{}
 }
@@ -142,16 +153,12 @@ func (rxd *tTIrxd) setSessionCharacterSet(sessCharSet driverCommon.UB2) {
 	rxd.sessCharSet = sessCharSet
 }
 
-/*
-
-setBindValues sets the outgoing bind payload for marshalling as an RXD message.
-
-Parameters:
-- row: row is the encoded data for one row: a slice of CLR-ready byte arrays, one per column.
-       Each element should contain the wire-format bytes for that column (nil indicates SQL NULL).
-*/
-
-func (rxd *tTIrxd) setBindValues(row []driverCommon.B1Array) {
+// setEncodedBinds assigns one fully described outgoing bind row, including
+// locator framing for temporary LOB bind values.
+//
+// Parameters:
+//   - row: TTC-ready bind values for one row.
+func (rxd *tTIrxd) setEncodedBinds(row []encodedBind) {
 	rxd.bindRow = row
 }
 
@@ -161,6 +168,8 @@ MarshalTo writes the RXD bind payload for outgoing messages (single row).
 When used as an outgoing message, tTIrxd marshals the bind row values as a CLR sequence,
 using the TTC null length indicator for nil values. The call to MarshalTo marshals the
 encoded bytes for a single row.
+
+For LOB locator binds, the locator byte length is written before the CLR value.
 */
 func (rxd *tTIrxd) MarshalTo(ctx context.Context, engine driverCommon.Marshaller) error {
 	// Nothing to marshal if no bind payload was configured.
@@ -169,7 +178,8 @@ func (rxd *tTIrxd) MarshalTo(ctx context.Context, engine driverCommon.Marshaller
 	}
 	bindCount := len(rxd.bindRow)
 	for i := 0; i < bindCount; i++ {
-		val := rxd.bindRow[i]
+		bind := rxd.bindRow[i]
+		val := bind.data
 		if val == nil {
 			// Write CLR null indicator
 			if err := engine.MarshalUB1(ctx, driverCommon.UB1(0)); err != nil {
@@ -178,6 +188,14 @@ func (rxd *tTIrxd) MarshalTo(ctx context.Context, engine driverCommon.Marshaller
 				return common.NewOracleError(oracleErrors.FailMarshal, err, TTCMsgTypeDescription[rxd.GetMsgCode()])
 			}
 			continue
+		}
+		if bind.lobLocator {
+			// A LOB bind carries its locator byte length before the CLR value.
+			if err := engine.MarshalUB4(ctx, driverCommon.UB4(len(val))); err != nil {
+				common.Odl.Error("tTIrxd.MarshalTo: failed to write LOB locator length",
+					"error", err, "stage", "lob-locator-length", "index", i)
+				return common.NewOracleError(oracleErrors.FailMarshal, err, TTCMsgTypeDescription[rxd.GetMsgCode()])
+			}
 		}
 		// Write as CLR (short or long form depending on size)
 		if err := engine.MarshalCLR(ctx, val, 0, len(val)); err != nil {

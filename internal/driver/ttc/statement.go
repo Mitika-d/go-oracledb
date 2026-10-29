@@ -122,6 +122,109 @@ delivered; callers may use the error for logging/diagnostics.
 */
 type statemementCancellationFunction func(ctx context.Context) error
 
+// preflightLobBindShape applies the SQL or PL/SQL bind mapping before streamed
+// LOB inputs can be consumed or temporary locators created. It runs only for
+// LOB-bearing calls so ordinary bind handling remains unchanged.
+//
+// Parameters:
+//   - query: parsed SQL or PL/SQL statement and its bind metadata.
+//   - args: normalized arguments to check against the bind metadata.
+//
+// Returns:
+//   - error: bind-name, ordinal, or required-value error; otherwise nil.
+func preflightLobBindShape(query *qualifiedSQLStatement, args []driver.NamedValue) error {
+	if query.kind == plsql {
+		// PL/SQL maps arguments by unique placeholder name or ordinal.
+		if _, err := extractInputBindValuesForPlSql(query.binds, args); err != nil {
+			return err
+		}
+		return validateStreamedLobBindCompleteness(query.binds, args, true)
+	}
+	// SQL mapping expands a named argument to each occurrence of that placeholder.
+	if _, err := extractInputBindValues(query.binds, args); err != nil {
+		return err
+	}
+	return validateStreamedLobBindCompleteness(query.binds, args, false)
+}
+
+// normalizeAndPreflightLobBinds converts explicit LOB markers and checks bind
+// shape before streamed inputs can be consumed.
+//
+// Parameters:
+//   - args: statement arguments that may contain typed LOB markers.
+//
+// Returns:
+//   - []driver.NamedValue: normalized statement arguments.
+//   - int: index of the first streamed LOB input, or -1 when there is none.
+//   - error: marker validation or bind-shape error; otherwise nil.
+func (s *Statement) normalizeAndPreflightLobBinds(args []driver.NamedValue) ([]driver.NamedValue, int, error) {
+	normalizedArgs, firstLobBindIndex, err := normalizeAndValidateLobBindArgs(args)
+	if err != nil {
+		return nil, -1, err
+	}
+	if firstLobBindIndex >= 0 {
+		if err := preflightLobBindShape(s.qualifiedQuery, normalizedArgs); err != nil {
+			return nil, -1, err
+		}
+	}
+	return normalizedArgs, firstLobBindIndex, nil
+}
+
+// validateStreamedLobBindCompleteness checks for omitted placeholders before
+// LOB readers are consumed. The bind extractors validate names, ordinals, and
+// duplicates but return only supplied values, so this pass checks completeness.
+//
+// Parameters:
+//   - binds: parsed SQL or PL/SQL placeholder metadata.
+//   - args: normalized statement arguments.
+//   - isPlSql: whether PL/SQL unique-name mapping applies.
+//
+// Returns:
+//   - error: missing-value error for the first omitted placeholder; otherwise nil.
+func validateStreamedLobBindCompleteness(binds *bindDetails, args []driver.NamedValue, isPlSql bool) error {
+	count := len(binds.bindNames)
+	if isPlSql {
+		count = len(binds.uniqueNames)
+	}
+	filled := make([]bool, count)
+	for _, arg := range args {
+		if isPlSql {
+			// PL/SQL has one slot per unique name; ordinals are already validated.
+			index := int(arg.Ordinal) - 1
+			if arg.Name != "" {
+				index = int(binds.uniqueNames[arg.Name])
+			}
+			if index >= 0 && index < len(filled) {
+				filled[index] = true
+			}
+			continue
+		}
+		// Mark every SQL occurrence because a named bind can appear more than once.
+		name := arg.Name
+		if name == "" && arg.Ordinal > 0 && int(arg.Ordinal) <= len(binds.bindNames) {
+			name = binds.bindNames[arg.Ordinal-1]
+		}
+		for _, index := range binds.bindMap[name] {
+			filled[index] = true
+		}
+	}
+	if isPlSql {
+		for _, name := range binds.bindNames {
+			index := binds.uniqueNames[name]
+			if !filled[index] {
+				return common.NewOracleError(oracleErrors.StatementParsingMissingValue, nil, name, int(index)+1)
+			}
+		}
+		return nil
+	}
+	for index, isFilled := range filled {
+		if !isFilled {
+			return common.NewOracleError(oracleErrors.StatementParsingMissingValue, nil, binds.bindNames[index], index+1)
+		}
+	}
+	return nil
+}
+
 // Statement represents a SQL statement bound to a connection and query text.
 type Statement struct {
 	shelf                  *ttiShelf[driverCommon.MessageType]
@@ -130,6 +233,7 @@ type Statement struct {
 	queryStatementExecutor QueryWithContext
 	execStatementExecutor  ExecWithContext
 	_rows                  driver.Rows // reference on created Rows.
+	sessionContext         *driverCommon.SessionContext
 }
 
 /*
@@ -178,6 +282,7 @@ func newStatement(
 	}
 	stmt := &Statement{
 		shelf:                  shelf,
+		sessionContext:         sessionCtx,
 		qualifiedQuery:         classifiedQ,
 		queryStatementExecutor: queryExecutor,
 		execStatementExecutor:  execExecutor,
@@ -196,14 +301,22 @@ driver.StmtQueryContext.
 
 Implementation details:
   - Validates args against the parsed bind placeholders (count and names).
+  - Normalizes LOB bind markers and prepares streamed inputs before the statement
+    executor marshals SQL binds.
   - Creates a child context with a cancellation after-function that can attempt
     a server-side break/reset when ctx is canceled or times out.
   - Delegates execution to the queryStatementExecutor, which performs the TTC
     pipeline and returns a driver.Rows implementation.
+  - Releases temporary LOB locators after the exchange reaches a known terminal
+    boundary; ambiguous failures discard the session.
 
 Callers must fully consume and Close the returned Rows.
 */
 func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	normalizedArgs, firstLobBindIndex, err := s.normalizeAndPreflightLobBinds(args)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
 	subContext, cancelSubContext, cleanup := s.createSubContextWithCancelAfterfunction(ctx)
 	defer cleanup()
 
@@ -216,8 +329,19 @@ func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) 
 		})
 		defer stopTransAfterFunction()
 	}
-	selectedRows, e := s.queryStatementExecutor.QueryContext(subContext, s.qualifiedQuery, args)
-	if e == nil {
+	preparedArgs, preparedBinds, err := prepareStreamedLobBinds(subContext, s.shelf, s.sessionContext, normalizedArgs, firstLobBindIndex)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
+	selectedRows, executionErr := s.queryStatementExecutor.QueryContext(subContext, s.qualifiedQuery, preparedArgs)
+	// Release bind locators only after a terminal response; ambiguous failures
+	// abandon them with the physical session instead of sending cleanup RPCs.
+	executionErr = releaseLobBindsAfterExecution(preparedBinds, executionErr)
+	if executionErr != nil && selectedRows != nil {
+		_ = selectedRows.Close()
+		selectedRows = nil
+	}
+	if executionErr == nil {
 		s._rows = selectedRows
 	}
 
@@ -225,7 +349,10 @@ func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) 
 		return nil, err
 	}
 
-	return selectedRows, s.shelf.LocalizeError(e)
+	if executionErr != nil {
+		return nil, s.shelf.LocalizeError(executionErr)
+	}
+	return selectedRows, nil
 }
 
 // _closeCursor closes the statement cursorID if not 0
@@ -257,7 +384,7 @@ func (s *Statement) _closeCursor() error {
 func (s *Statement) Close() error {
 	var finalErr oracleErrors.SQLError
 
-	//  close the associated rows if any
+	// close the associated rows if any
 	if s._rows != nil {
 		err := s._rows.Close()
 		if err != nil {
@@ -297,14 +424,22 @@ driver.StmtExecContext.
 
 Implementation details:
   - Validates args against the parsed bind placeholders (count and names).
+  - Normalizes LOB bind markers and prepares streamed inputs before the statement
+    executor marshals SQL binds.
   - Creates a child context with a cancellation after-function that can attempt
     a server-side break/reset when ctx is canceled or times out.
   - Delegates execution to the execStatementExecutor, which performs the TTC
     operations and returns a driver.Result.
+  - Releases temporary LOB locators after the exchange reaches a known terminal
+    boundary; ambiguous failures discard the session.
 
 The returned Result may expose rows-affected metadata when the server provides it.
 */
 func (s *Statement) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	normalizedArgs, firstLobBindIndex, err := s.normalizeAndPreflightLobBinds(args)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
 	subContext, cancelSubContext, cleanup := s.createSubContextWithCancelAfterfunction(ctx)
 	defer cleanup()
 
@@ -317,7 +452,15 @@ func (s *Statement) ExecContext(ctx context.Context, args []driver.NamedValue) (
 		})
 		defer stopTransAfterFunction()
 	}
-	result, err := s.execStatementExecutor.ExecContext(subContext, s.qualifiedQuery, args)
+
+	preparedArgs, preparedBinds, err := prepareStreamedLobBinds(subContext, s.shelf, s.sessionContext, normalizedArgs, firstLobBindIndex)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
+	// Keep temporary bind locators until execution finishes so cleanup can
+	// respond to whether the TTC exchange succeeded or left the stream ambiguous.
+	result, err := s.execStatementExecutor.ExecContext(subContext, s.qualifiedQuery, preparedArgs)
+	err = releaseLobBindsAfterExecution(preparedBinds, err)
 	if err := s.shelf.checkCurrentState(ctx); err != nil {
 		return nil, err
 	}

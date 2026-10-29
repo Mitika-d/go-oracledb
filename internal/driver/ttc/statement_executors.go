@@ -75,6 +75,8 @@ Contract:
   - The returned Rows streams result data; callers must iterate to completion and
     call Close to release resources.
   - The passed query host the request cursor Id that would be updated after round-trips
+  - args contains only Oracle bind values; public LOB bind markers have already
+    been converted to prepared locator binds by the Statement layer.
 
 Parameters:
 - ctx: request-scoped context for cancellation and timeouts.
@@ -107,9 +109,11 @@ Implementations:
     For DML, implementations may expose rows-affected metadata when available.
 
 Contract:
-- Intended for DML/DDL/PL/SQL statements that do not produce a result set.
-- Should return a Result that may include RowsAffected when provided by the server.
-- The passed query host the request cursor Id that would be updated after round-trips
+  - Intended for DML/DDL/PL/SQL statements that do not produce a result set.
+  - Should return a Result that may include RowsAffected when provided by the server.
+  - The passed query host the request cursor Id that would be updated after round-trips
+  - args contains only Oracle bind values; public LOB bind markers have already
+    been converted to prepared locator binds by the Statement layer.
 
 Parameters:
 - ctx: request-scoped context for cancellation and timeouts.
@@ -133,7 +137,7 @@ type statementProcessor struct {
 	opts          driverCommon.UB4                    // OALL8 option bitmask (parse/execute/commit/no-PLSQL/binds-present flags etc).
 	al8i4         []driverCommon.UB4                  // AL8I4 options vector attached to OALL8 (iterations, select flag, extra protocol flags).
 	bindValues    []any                               // Original bind values (ordered by position) for the current execution.
-	encodedValues [][]driverCommon.B1Array            // Wire-encoded bind payloads per iteration (each inner slice is a TTIRXD bind row).
+	encodedValues [][]encodedBind                     // Encoded bind payloads per iteration, including LOB locator framing.
 	currentOacs   []driverCommon.Marshallable         // Per-bind OAC descriptors (type/size metadata) sent alongside bind values.
 	previousOacs  []driverCommon.Marshallable         // Cached OACs from previous execution of the statement
 }
@@ -753,10 +757,12 @@ func buildAl8i4(iterations driverCommon.UB4, selectStmt bool, flags driverCommon
 prepareBindsAndOAC prepares bind payloads and OAC descriptors for an OALL8 execution.
 
 Description:
-  - Encodes each bind value using the TypeCodecFactory encoder for reflect.TypeOf(value)
-    and stores the result in e.encodedValues as a single "iteration" (one TTIRXD row).
-  - Creates an OAC for each bind using the TypeCodecFactory OAC builder for reflect.TypeOf(value),
-    and sizes the OAC using the encoded byte length for that bind.
+  - Encodes non-LOB bind values with the TypeCodecFactory and stores all encoded
+    payloads as one iteration (one TTIRXD row).
+  - Encodes prepared LOB locator binds with LOB-specific RXD framing and OAC
+    metadata.
+  - Builds OACs for non-LOB binds with the TypeCodecFactory and sizes them from
+    their encoded payloads.
 
 Parameters:
 - args: The ordered sqldriver.Value for each bind position.
@@ -767,7 +773,8 @@ Notes / limitations:
     provide args in the final bind position order.
 
 Returns:
-  - error: non-nil if encoder/OAC factory lookup fails or if encoding fails for any bind value.
+  - error: non-nil if a bind cannot be encoded, OAC construction fails, or an
+    unprepared streamed LOB reaches this layer.
 */
 func (e *statementProcessor) prepareBindsAndOAC(args []sqldriver.Value) error {
 	n := len(args)
@@ -775,12 +782,21 @@ func (e *statementProcessor) prepareBindsAndOAC(args []sqldriver.Value) error {
 	e.bindValues = make([]any, n)
 	// TODO : currently, just do it for single row, later when
 	//        batching support is added, make it dynamic.
-	e.encodedValues = make([][]driverCommon.B1Array, 1)
+	e.encodedValues = make([][]encodedBind, 1)
 	currentRow := 0
-	e.encodedValues[currentRow] = make([]driverCommon.B1Array, n)
+	e.encodedValues[currentRow] = make([]encodedBind, n)
 	e.currentOacs = make([]driverCommon.Marshallable, n)
 	for i, v := range args {
 		e.bindValues[i] = v
+		if bind, isLobLocatorBind := v.(lobLocatorBind); isLobLocatorBind {
+			encoded, oac := encodeLobLocatorBind(bind)
+			e.encodedValues[currentRow][i] = encodedBind{data: encoded, lobLocator: true}
+			e.currentOacs[i] = oac
+			continue
+		}
+		if _, isLobInput := v.(lobBindInput); isLobInput {
+			return common.NewOracleError(oracleErrors.InvalidLobInput, nil, "bind preparation")
+		}
 		// sql.Out{}, int, float, string,time
 		var err error
 		normalized := normalizeBindValue(v)
@@ -789,14 +805,15 @@ func (e *statementProcessor) prepareBindsAndOAC(args []sqldriver.Value) error {
 			return err
 		}
 
-		e.encodedValues[currentRow][i], err = encoder(normalized.value)
-		if err != nil {
-			return err
+		encoded, encodeErr := encoder(normalized.value)
+		if encodeErr != nil {
+			return encodeErr
 		}
+		e.encodedValues[currentRow][i] = encodedBind{data: encoded}
 
 		e.currentOacs[i], err = e.shelf.GetCodecFactory().getBindOac(
 			normalized,
-			e.getMaxLengthForOac(i, len(e.encodedValues[currentRow][i])),
+			e.getMaxLengthForOac(i, len(e.encodedValues[currentRow][i].data)),
 		)
 		if err != nil {
 			return err
@@ -836,7 +853,7 @@ func (e *statementProcessor) pushBindRows(
 			return common.NewOracleError(errCode, gerr, "push")
 		}
 		rxd := msg.(*tTIrxd)
-		rxd.setBindValues(row)
+		rxd.setEncodedBinds(row)
 		if err := stmr.Push(ctx, rxd); err != nil {
 			common.Odl.Error(caller+": Push RXD failed", "error", err, "stage", "push", "msgCode", rxd.GetMsgCode())
 			return common.NewOracleError(errCode, err, "push")

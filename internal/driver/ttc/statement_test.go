@@ -47,6 +47,7 @@ import (
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
 	drvierCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
+	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 	"golang.org/x/text/language"
 )
@@ -67,6 +68,66 @@ type queryContextFunc func(context.Context, *qualifiedSQLStatement, []driver.Nam
 // QueryContext calls the wrapped function literal.
 func (f queryContextFunc) QueryContext(ctx context.Context, query *qualifiedSQLStatement, args []driver.NamedValue) (driver.Rows, error) {
 	return f(ctx, query, args)
+}
+
+// TestStatement_ValidatesBindShapeBeforeConsumingLobSource verifies malformed
+// SQL arguments are rejected without reading a streamed LOB source or sending
+// a TTC request.
+func TestStatement_ValidatesBindShapeBeforeConsumingLobSource(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		query     string
+		args      []driver.NamedValue
+		wantError oracleErrors.ErrorCode
+	}{
+		{
+			name:      "extra ordinal",
+			query:     "insert into t values (:1)",
+			args:      []driver.NamedValue{{Ordinal: 1, Value: newLobBindInput(&failIfReadReader{}, internallob.BLOB, 1)}, {Ordinal: 2, Value: int64(2)}},
+			wantError: oracleErrors.StatementParsingInvalidOrdinal,
+		},
+		{
+			name:      "missing later bind after streamed input",
+			query:     "insert into t values (:1, :2)",
+			args:      []driver.NamedValue{{Ordinal: 1, Value: newLobBindInput(&failIfReadReader{}, internallob.BLOB, 1)}},
+			wantError: oracleErrors.StatementParsingMissingValue,
+		},
+	}
+	for _, test := range testCases {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			query, err := newQualifiedSQLStatement(test.query)
+			if err != nil {
+				t.Fatalf("newQualifiedSQLStatement returned error: %v", err)
+			}
+			source := test.args[0].Value.(lobBindInput).source.(*failIfReadReader)
+			shelf, _, buffer := newExecTestShelf(1024)
+			executorCalled := false
+			stmt := &Statement{
+				shelf:          shelf,
+				sessionContext: newTestSessionContext(),
+				qualifiedQuery: query,
+				execStatementExecutor: execContextFunc(func(context.Context, *qualifiedSQLStatement, []driver.NamedValue) (driver.Result, error) {
+					executorCalled = true
+					return nil, nil
+				}),
+			}
+			initialWritePosition := buffer.currentWritePosition
+			_, err = stmt.ExecContext(context.Background(), test.args)
+			requireErrorCode(t, err, test.wantError)
+			if source.read {
+				t.Fatal("LOB source was consumed before SQL bind validation")
+			}
+			if executorCalled {
+				t.Fatal("statement executor was called after bind-shape validation failed")
+			}
+			if buffer.currentWritePosition != initialWritePosition {
+				t.Fatalf("TTC write position = %d, want %d", buffer.currentWritePosition, initialWritePosition)
+			}
+		})
+	}
 }
 
 // Tests cancelCurrentExecution

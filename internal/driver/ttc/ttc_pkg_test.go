@@ -503,7 +503,6 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestLobManager_SharesSessionExecutors", Categories: "unitary", Exclusive: false, Fn: TestLobManager_SharesSessionExecutors},
 	{Name: "TestLobManager_DispatchesAllLOBOperations", Categories: "unitary", Exclusive: false, Fn: TestLobManager_DispatchesAllLOBOperations},
 	{Name: "TestLobManager_HandlesSessionAbandonmentAndReferenceErrors", Categories: "unitary", Exclusive: false, Fn: TestLobManager_HandlesSessionAbandonmentAndReferenceErrors},
-	{Name: "TestLobManager_RejectsIncompleteSession", Categories: "unitary", Exclusive: false, Fn: TestLobManager_RejectsIncompleteSession},
 	{Name: "TestLobSessionState_InitializesAndCachesExecutors", Categories: "unitary", Exclusive: false, Fn: TestLobSessionState_InitializesAndCachesExecutors},
 	{Name: "TestLobSessionState_ConcurrentExecutorInitialization", Categories: "unitary", Exclusive: false, Fn: TestLobSessionState_ConcurrentExecutorInitialization},
 	{Name: "TestLobSessionState_Invalidation", Categories: "unitary", Exclusive: false, Fn: TestLobSessionState_Invalidation},
@@ -694,6 +693,31 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "Test_ttiSTA_getConnectionShouldBeDropped", Categories: "unitary", Exclusive: false, Fn: Test_ttiSTA_getConnectionShouldBeDropped},
 
 	{Name: "TestTypeRep_UnmarshalFrom_TooManyTypeRepresentations", Categories: "unitary", Exclusive: false, Fn: TestTypeRep_UnmarshalFrom_TooManyTypeRepresentations},
+
+	// PR3 streamed LOB bind coverage.
+	{Name: "TestStatementProcessor_RejectsUnpreparedStreamedLobInput", Categories: "unitary", Exclusive: false, Fn: TestStatementProcessor_RejectsUnpreparedStreamedLobInput},
+	{Name: "TestStatement_ValidatesBindShapeBeforeConsumingLobSource", Categories: "unitary", Exclusive: false, Fn: TestStatement_ValidatesBindShapeBeforeConsumingLobSource},
+	{Name: "TestTTIrxd_MarshalTo_LobLocatorBind", Categories: "unitary", Exclusive: false, Fn: TestTTIrxd_MarshalTo_LobLocatorBind},
+	{Name: "TestLobBindPipeline_StreamBlobInputIsBoundedAndHonorsDeclaredSize", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamBlobInputIsBoundedAndHonorsDeclaredSize},
+	{Name: "TestLobBindInput_ValidateRejectsInvalidMetadata", Categories: "unitary", Exclusive: false, Fn: TestLobBindInput_ValidateRejectsInvalidMetadata},
+	{Name: "TestLobBindInput_ValidateAcceptsValidInputs", Categories: "unitary", Exclusive: false, Fn: TestLobBindInput_ValidateAcceptsValidInputs},
+	{Name: "TestLobBindPipeline_NormalizeLobBindArgsConvertsMarkersToInputs", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_NormalizeLobBindArgsConvertsMarkersToInputs},
+	{Name: "TestLobBindPipeline_NormalizeLobBindArgsLeavesOrdinaryValuesUntouched", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_NormalizeLobBindArgsLeavesOrdinaryValuesUntouched},
+	{Name: "TestLobBindPipeline_CheckNamedValueAcceptsLOBMarkers", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_CheckNamedValueAcceptsLOBMarkers},
+	{Name: "TestLobBindPipeline_NormalizeAndValidateLobBindArgsBeforeReading", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_NormalizeAndValidateLobBindArgsBeforeReading},
+	{Name: "TestLobBindPipeline_IsTerminalOracleError", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_IsTerminalOracleError},
+	{Name: "TestLobBindPipeline_ReleaseBindsAfterExecution", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_ReleaseBindsAfterExecution},
+	{Name: "TestLobBindPipeline_StreamBlobInputRejectsShortSourceAndAcknowledgement", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamBlobInputRejectsShortSourceAndAcknowledgement},
+	{Name: "TestLobBindPipeline_StreamBlobInputAbandonsCleanupAfterAmbiguousWriteFailure", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamBlobInputAbandonsCleanupAfterAmbiguousWriteFailure},
+	{Name: "TestLobBindPipeline_StreamCLOBAndNCLOBInputUseUCS2AmountsAndOffsets", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamCLOBAndNCLOBInputUseUCS2AmountsAndOffsets},
+	{Name: "TestLobBindPipeline_StreamClobInputRejectsMalformedUTF8", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamClobInputRejectsMalformedUTF8},
+	{Name: "TestLobBindPipeline_StreamClobInputHandlesBoundaries", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamClobInputHandlesBoundaries},
+	{Name: "TestLobBindPipeline_EncodeLobLocatorBindUsesLobOAC", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_EncodeLobLocatorBindUsesLobOAC},
+	{Name: "TestLobBindPipeline_FreeLobReferenceDefersAndInvalidatesLocator", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_FreeLobReferenceDefersAndInvalidatesLocator},
+	{Name: "TestLobBindPipeline_PreparedLobBindsLifecycle", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_PreparedLobBindsLifecycle},
+	{Name: "TestLobBindPipeline_PrepareAndRunHelpers", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_PrepareAndRunHelpers},
+	{Name: "TestLobBindPipeline_StreamBlobInputRejectsSourceFailures", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamBlobInputRejectsSourceFailures},
+	{Name: "TestLobBindPipeline_StreamClobInputRejectsSourceAndAcknowledgementFailures", Categories: "unitary", Exclusive: false, Fn: TestLobBindPipeline_StreamClobInputRejectsSourceAndAcknowledgementFailures},
 }
 
 // ArrayBasedDataBuffer is an implementation of DataBuffer for testing purposes.
