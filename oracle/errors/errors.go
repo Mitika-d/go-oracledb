@@ -230,7 +230,6 @@ const (
 	EmptyUsernameError      ErrorCode = "OGD-00098"
 	NoAuthenticatorError    ErrorCode = "OGD-00099"
 	ServerTimeZoneError     ErrorCode = "OGD-00110"
-
 	ProtocolViolationLimitExceeded ErrorCode = "OGD-00200"
 
 	// EmptyTokenError indicates that the configured token value is empty after
@@ -274,6 +273,9 @@ const (
 	// UnsupportedLobOperation indicates the operation is not supported for the selected LOB
 	// family or access mode.
 	UnsupportedLobOperation ErrorCode = "OGD-00308"
+	// LobValueInvalidated indicates the Rows, statement, transaction, or
+	// connection that owns a locator-backed LOB is no longer usable.
+	LobValueInvalidated ErrorCode = "OGD-00309"
 )
 
 // OracleRefuseErrorCodes maps ORA error numbers to the driver error
