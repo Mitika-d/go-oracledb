@@ -61,6 +61,9 @@ type connection struct {
 	shelf   *ttiShelf[driverCommon.MessageType]
 	sessCtx *driverCommon.SessionContext
 	ns      driverCommon.NetworkSession
+	// leaseGeneration is set on LOB-only facades and expires when the physical
+	// connection is returned to the pool.
+	leaseGeneration *uint64
 	// _isClosed is used to know if the connection has been closed. If _isClosed
 	// is set to true the connection cannot be used.
 	_isClosed bool
@@ -197,7 +200,7 @@ func (c *connection) cancelCurrentExecution(ctx context.Context) error {
 	if err := c.ns.CancelOperation(ctx); err != nil {
 		// If an error occurs during cancellation, mark the connection as invalid so that
 		// it will be dropped form the pool
-		c._isValid = false
+		c.invalidate()
 		e := common.NewOracleError(oracleErrors.CancelOperationError, err, nil)
 		return c.shelf.LocalizeError(e)
 	}
@@ -230,7 +233,9 @@ func (c *connection) _handleConnectionShouldBeDropped(msg driverCommon.Message[d
 	// if connectionSouldBeDropped flag was received in TTISTA or TTIOER, it means
 	// that the connection is being drainned and it should be closed and not
 	// released to the connection pool
-	c._isValid = !msg.(connectionStatusProvider).isBeingDrainned()
+	if msg.(connectionStatusProvider).isBeingDrainned() {
+		c.invalidate()
+	}
 	// return always true, the incoming message should be kept
 	return true, nil
 }
@@ -245,20 +250,29 @@ func (c *connection) registerEventListeners(service *eventService) {
 	service.register(c, streamerOverFlowEvent)
 }
 
-// notify implements eventListener.
+// notify implements EventListener interface
 func (c *connection) notify(event eventType) {
-	var wasValid = c._isValid == true
 	switch event {
 	case streamerStaleEvent:
 		common.Odl.Fine("Connection.notify: streamer stale received")
-		c._isValid = false
+		c.invalidate()
 	case streamerOverFlowEvent:
 		common.Odl.Fine("Connection.notify: streamer overflow received")
-		c._isValid = false
+		c.invalidate()
 	default:
 		common.Odl.Fine("Connection.notify: received", "evt", event)
 	}
-	if wasValid == true && c._isValid == false {
+}
+
+// invalidate marks the connection unusable and posts the invalidation event.
+func (c *connection) invalidate() {
+	wasValid := c._isValid
+	c._isValid = false
+	if c.shelf != nil && c.shelf.lobState != nil {
+		c.shelf.lobState.invalidate()
+	}
+	if wasValid {
+		discardLobSessionState(c.shelf)
 		c.shelf.getEventService().post(connectionInvalidatedEvent)
 	}
 }

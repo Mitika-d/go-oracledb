@@ -234,6 +234,9 @@ const (
 	// UnsupportedLobOperation indicates the operation is not supported for the selected LOB
 	// family or access mode.
 	UnsupportedLobOperation ErrorCode = "OGD-00111"
+	// LobValueInvalidated indicates the Rows, statement, transaction, or
+	// connection that owns a locator-backed LOB is no longer usable.
+	LobValueInvalidated ErrorCode = "OGD-00174"
 
 	ProtocolViolationLimitExceeded ErrorCode = "OGD-00200"
 
