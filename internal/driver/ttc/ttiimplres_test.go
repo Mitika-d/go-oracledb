@@ -127,6 +127,58 @@ func TestTTCRows_RefCursorNextAndClose(t *testing.T) {
 	}
 }
 
+// TestTTCRows_RefCursorCloseQueuesServerCursorClose exercises successful OCCA
+// queueing and error propagation while closing a server-owned REF CURSOR.
+func TestTTCRows_RefCursorCloseQueuesServerCursorClose(t *testing.T) {
+	t.Parallel()
+
+	factoryErr := errors.New("factory failed")
+	pushErr := errors.New("push failed")
+	tests := []struct {
+		name       string
+		factoryErr error
+		pushErr    error
+		wantErr    error
+	}{
+		{name: "success"},
+		{name: "factory error", factoryErr: factoryErr, wantErr: factoryErr},
+		{name: "push error", pushErr: pushErr, wantErr: pushErr},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			shelf := newShelf[driverCommon.MessageType]()
+			factory := &mockFactory{returnMsg: &tTIOcca{}, returnErr: test.factoryErr}
+			streamer := &mockStreamer{pushErr: test.pushErr}
+			shelf.RegisterMessageFactory(factory)
+			shelf.RegisterMessageStreamer(streamer)
+
+			rows := newRefCursorRows(94, nil)
+			rows.attachShelf(shelf)
+			shelf.addRefCursor(rows)
+			err := rows.Close()
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("Close() error = %v, want %v", err, test.wantErr)
+			}
+			if test.wantErr == nil {
+				if rows.cursorID != 0 {
+					t.Fatalf("cursor ID after close = %d, want 0", rows.cursorID)
+				}
+				if shelf.hasRefCursor(rows) {
+					t.Fatal("closed cursor remained registered with its shelf")
+				}
+				if !streamer.pushCalled {
+					t.Fatal("OCCA was not queued on the message streamer")
+				}
+				return
+			}
+			if rows.cursorID == 0 {
+				t.Fatal("cursor ID was cleared after unsuccessful OCCA queueing")
+			}
+		})
+	}
+}
+
 // TestTTIimplres_ZeroResultSets decodes an IMPLRES message with no result sets.
 func TestTTIimplres_ZeroResultSets(t *testing.T) {
 	ctx := context.Background()

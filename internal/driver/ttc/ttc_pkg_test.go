@@ -493,6 +493,32 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestPrepareBindsAndOAC_OAC_Errors", Categories: "unitary", Exclusive: false, Fn: TestPrepareBindsAndOAC_OAC_Errors},
 	{Name: "TestStatementExecutor_DML_Insert_Prepared_MarshalAndExec", Categories: "unitary", Exclusive: false, Fn: TestStatementExecutor_DML_Insert_Prepared_MarshalAndExec},
 	{Name: "TestStatementExecutor_Select_Prepared_MarshalAndQuery", Categories: "unitary", Exclusive: false, Fn: TestStatementExecutor_Select_Prepared_MarshalAndQuery},
+	{Name: "TestLobManager_OwnsTemporaryReference", Categories: "unitary", Exclusive: false, Fn: TestLobManager_OwnsTemporaryReference},
+	{Name: "TestLobManager_RejectsUnsupportedKind", Categories: "unitary", Exclusive: false, Fn: TestLobManager_RejectsUnsupportedKind},
+	{Name: "TestLobManager_RejectsInvalidOperationOptionsAndKinds", Categories: "unitary", Exclusive: false, Fn: TestLobManager_RejectsInvalidOperationOptionsAndKinds},
+	{Name: "TestLobManager_CreateTemporaryReturnsExecutorError", Categories: "unitary", Exclusive: false, Fn: TestLobManager_CreateTemporaryReturnsExecutorError},
+	{Name: "TestLobManager_DecodePrefixEmptyPayload", Categories: "unitary", Exclusive: false, Fn: TestLobManager_DecodePrefixEmptyPayload},
+	{Name: "TestLobManager_RejectsNilLocator", Categories: "unitary", Exclusive: false, Fn: TestLobManager_RejectsNilLocator},
+	{Name: "TestLobManager_SharesSessionExecutors", Categories: "unitary", Exclusive: false, Fn: TestLobManager_SharesSessionExecutors},
+	{Name: "TestLobManager_DispatchesAllLOBOperations", Categories: "unitary", Exclusive: false, Fn: TestLobManager_DispatchesAllLOBOperations},
+	{Name: "TestLobManager_HandlesSessionAbandonmentAndReferenceErrors", Categories: "unitary", Exclusive: false, Fn: TestLobManager_HandlesSessionAbandonmentAndReferenceErrors},
+	{Name: "TestLobManager_RejectsIncompleteSession", Categories: "unitary", Exclusive: false, Fn: TestLobManager_RejectsIncompleteSession},
+	{Name: "TestLobSessionState_InitializesAndCachesExecutors", Categories: "unitary", Exclusive: false, Fn: TestLobSessionState_InitializesAndCachesExecutors},
+	{Name: "TestLobSessionState_Invalidation", Categories: "unitary", Exclusive: false, Fn: TestLobSessionState_Invalidation},
+	{Name: "TestLobSessionState_CurrentLeaseGenerationHandlesNilState", Categories: "unitary", Exclusive: false, Fn: TestLobSessionState_CurrentLeaseGenerationHandlesNilState},
+	{Name: "TestConnectionLob_LocatorOperationsRejectEmptyLocator", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LocatorOperationsRejectEmptyLocator},
+	{Name: "TestConnectionLob_NewLeaseRejectsInvalidInputs", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_NewLeaseRejectsInvalidInputs},
+	{Name: "TestConnectionLob_LeaseValidationRejectsInvalidState", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LeaseValidationRejectsInvalidState},
+	{Name: "TestConnectionLob_AcquireLeaseRejectsInvalidState", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_AcquireLeaseRejectsInvalidState},
+	{Name: "TestConnectionLob_LeaseExpiresAfterPoolReturn", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LeaseExpiresAfterPoolReturn},
+	{Name: "TestConnectionLob_LeaseExpiryWaitsForOperation", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LeaseExpiryWaitsForOperation},
+	{Name: "TestConnectionLob_LobOperationRejectsUnavailableState", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LobOperationRejectsUnavailableState},
+	{Name: "TestConnectionLob_LobOperationAbandonsSessionAfterTerminalError", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LobOperationAbandonsSessionAfterTerminalError},
+	{Name: "TestConnectionLob_LobCreateRejectsIncompleteSession", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LobCreateRejectsIncompleteSession},
+	{Name: "TestConnectionLob_LobFreeQueuesTemporaryLocator", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LobFreeQueuesTemporaryLocator},
+	{Name: "TestConnectionLob_ReadReturnsPayloadAndLogicalAmount", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_ReadReturnsPayloadAndLogicalAmount},
+	{Name: "TestConnectionLob_LobOperationsRejectUnknownKind", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LobOperationsRejectUnknownKind},
+	{Name: "TestConnectionLob_LobSessionKeyReturnsPhysicalSession", Categories: "unitary", Exclusive: false, Fn: TestConnectionLob_LobSessionKeyReturnsPhysicalSession},
 
 	{Name: "TestOexfen_New_Getters", Categories: "unitary", Exclusive: false, Fn: TestOexfen_New_Getters},
 	{Name: "TestOexfen_MarshalTo_MatchesGolden", Categories: "unitary", Exclusive: false, Fn: TestOexfen_MarshalTo_MatchesGolden},
@@ -602,6 +628,22 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestTTILobd_MarshalTo_Success", Categories: "unitary", Exclusive: false, Fn: TestTTILobd_MarshalTo_Success},
 	{Name: "TestTTILobd_UnmarshalFrom_Fail", Categories: "unitary", Exclusive: false, Fn: TestTTILobd_UnmarshalFrom_Fail},
 	{Name: "TestTTILobd_UnmarshalFrom_Success", Categories: "unitary", Exclusive: false, Fn: TestTTILobd_UnmarshalFrom_Success},
+	{Name: "TestLobReferenceRegistry_ReferenceCountDefersFreeUntilLastAlias", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_ReferenceCountDefersFreeUntilLastAlias},
+	{Name: "TestLobReferenceRegistry_LastReleasePiggybacksBeforeNextFunction", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_LastReleasePiggybacksBeforeNextFunction},
+	{Name: "TestLobReferenceRegistry_RejectsRetainAfterFreeQueued", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_RejectsRetainAfterFreeQueued},
+	{Name: "TestLobReferenceRegistry_ArrayPiggybackMarshalsWithOrdinaryFunction", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_ArrayPiggybackMarshalsWithOrdinaryFunction},
+	{Name: "TestLobReferenceRegistry_PiggybackBatchesPendingLocators", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_PiggybackBatchesPendingLocators},
+	{Name: "TestLobReferenceRegistry_LogoffDiscardsPendingFree", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_LogoffDiscardsPendingFree},
+	{Name: "TestLobReferenceRegistry_UsesStableLobIDNotMutableFlags", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_UsesStableLobIDNotMutableFlags},
+	{Name: "TestLobReferenceRegistry_ReferenceRejectsLocatorWithoutCompleteID", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_ReferenceRejectsLocatorWithoutCompleteID},
+	{Name: "TestLobReferenceRegistry_PiggybackMarshallingFailureRestoresPendingBatch", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_PiggybackMarshallingFailureRestoresPendingBatch},
+	{Name: "TestLobReferenceRegistry_PiggybackTransportFailureInvalidatesAndDiscards", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_PiggybackTransportFailureInvalidatesAndDiscards},
+	{Name: "TestLobReferenceRegistry_PiggybackIsNotRestoredAfterMainResponseFailure", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_PiggybackIsNotRestoredAfterMainResponseFailure},
+	{Name: "TestLobReferenceRegistry_PiggybackPreservesExistingPiggybackOrdering", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_PiggybackPreservesExistingPiggybackOrdering},
+	{Name: "TestLobReferenceRegistry_ReleaseReferenceAcceptsNil", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_ReleaseReferenceAcceptsNil},
+	{Name: "TestLobReferenceRegistry_LogoffRemovesQueuedFree", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_LogoffRemovesQueuedFree},
+	{Name: "TestLobReferenceRegistry_ExtractAcceptsAbstractLocator", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_ExtractAcceptsAbstractLocator},
+	{Name: "TestLobReferenceRegistry_ExtractRejectsIneligibleLocators", Categories: "unitary", Exclusive: false, Fn: TestLobReferenceRegistry_ExtractRejectsIneligibleLocators},
 	{Name: "TestTTIShelf_LocalizedStatementExecError", Categories: "unitary", Exclusive: false, Fn: TestTTIShelf_LocalizedStatementExecError},
 	{Name: "TestTTIShelf_StatementDrain", Categories: "unitary", Exclusive: false, Fn: TestTTIShelf_StatementDrain},
 	{Name: "TestTTIShelf_ValidateConnection", Categories: "unitary", Exclusive: false, Fn: TestTTIShelf_ValidateConnection},
@@ -611,6 +653,7 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestTTIShelf_RegisterProviderRegistry_ReplacesExistingRegistry", Categories: "unitary", Exclusive: false, Fn: TestTTIShelf_RegisterProviderRegistry_ReplacesExistingRegistry},
 	{Name: "TestTTIlob_GetFuncCode", Categories: "unitary", Exclusive: false, Fn: TestTTIlob_GetFuncCode},
 	{Name: "TestTTIlob_GetMsgCode", Categories: "unitary", Exclusive: false, Fn: TestTTIlob_GetMsgCode},
+	{Name: "TestTTIlobPiggyback_GetMsgCode", Categories: "unitary", Exclusive: false, Fn: TestTTIlobPiggyback_GetMsgCode},
 	{Name: "TestTTIlob_MarshalTo_Fail", Categories: "unitary", Exclusive: false, Fn: TestTTIlob_MarshalTo_Fail},
 	{Name: "TestTTIlob_MarshalTo_Success", Categories: "unitary", Exclusive: false, Fn: TestTTIlob_MarshalTo_Success},
 	{Name: "TestTTIlob_MarshalTo_WithoutDefinition", Categories: "unitary", Exclusive: false, Fn: TestTTIlob_MarshalTo_WithoutDefinition},
@@ -995,16 +1038,17 @@ func (t *TestDataBuffer) ReadBytesWithContext(ctx context.Context, n int32) (*[]
 
 // mockStreamer implements common.Streamer[common.MessageType] for testing
 type mockStreamer struct {
-	pushCalled bool
-	pushedMsg  list.List
-	pushErr    error
-	flushErr   error
-	pullCalled bool
-	pullTypes  []common.MessageType
-	pullMsg    common.Message[common.MessageType]
-	pullMsgs   []common.Message[common.MessageType]
-	pullErr    error
-	drainIn    int
+	pushCalled  bool
+	pushedMsg   list.List
+	pushErr     error
+	flushErr    error
+	flushCalled bool
+	pullCalled  bool
+	pullTypes   []common.MessageType
+	pullMsg     common.Message[common.MessageType]
+	pullMsgs    []common.Message[common.MessageType]
+	pullErr     error
+	drainIn     int
 }
 
 // wrapped mock stream combines both a pre-filled message incoming queue
@@ -1092,6 +1136,7 @@ func (m *mockStreamer) Pull(_ context.Context, types ...common.MessageType) (com
 }
 
 func (m *mockStreamer) Flush(_ context.Context) error {
+	m.flushCalled = true
 	return m.flushErr
 }
 

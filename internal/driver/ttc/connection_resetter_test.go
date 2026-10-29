@@ -68,7 +68,9 @@ func TestConnectionResetter_Reset(t *testing.T) {
 
 	connection := newTestConnection(shelf, sessionCtx, mockNs)
 
-	connection.PrepareContext(context.Background(), "SELECT * FROM DUAL")
+	if _, err := connection.PrepareContext(context.Background(), "SELECT * FROM DUAL"); err != nil {
+		t.Fatalf("prepare statement: %v", err)
+	}
 
 	if len(connection.shelf.GetStatements(false)) != 1 {
 		t.Errorf("list of statements should not be empty, got [%v]", connection.shelf.GetStatements(false))
@@ -76,7 +78,9 @@ func TestConnectionResetter_Reset(t *testing.T) {
 
 	sessionCtx.GetSessionProperties().SetProperty("pasta", "carbonara")
 
-	connection.ResetSession(context.Background())
+	if err := connection.ResetSession(context.Background()); err != nil {
+		t.Fatalf("reset session: %v", err)
+	}
 	if len(connection.shelf.GetStatements(false)) != 0 {
 		t.Errorf("list of statements should be empty, got [%v]", connection.shelf.GetStatements(false))
 	}

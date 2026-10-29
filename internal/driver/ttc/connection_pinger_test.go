@@ -46,6 +46,7 @@ import (
 	"github.com/oracle/go-oracledb/v26/internal/driver/common"
 )
 
+// TestConnectionPinger_Ping verifies a successful TTC ping.
 func TestConnectionPinger_Ping(t *testing.T) {
 	t.Parallel()
 	mockFac := &mockFactory{
@@ -98,6 +99,8 @@ func TestConnectionPinger_Ping(t *testing.T) {
 
 }
 
+// TestConnectionPinger_IsValid verifies a valid connection without an in-band
+// invalidation notification.
 func TestConnectionPinger_IsValid(t *testing.T) {
 	t.Parallel()
 	mockFac := &mockFactory{
@@ -127,6 +130,8 @@ func TestConnectionPinger_IsValid(t *testing.T) {
 
 }
 
+// TestConnectionPinger_IsValidWithInband verifies that an in-band notification
+// invalidates the connection and its LOB session state.
 func TestConnectionPinger_IsValidWithInband(t *testing.T) {
 	t.Parallel()
 	mockFac := &mockFactory{

@@ -471,6 +471,12 @@ func initMessagesEn() {
 	// Comment:  N/A
 	message.SetString(language.English, string(oracleErrors.InvalidRefCursorArgument), "invalid REF CURSOR argument")
 
+	// Locator-backed LOB lifecycle and input errors.
+	// Document: No
+	// Cause:    The Rows, statement, transaction, or connection owning the LOB locator is no longer usable.
+	// Action:   Re-run the query and scan a new LOB value.
+	// Comment:  Arg[0]: invalidation detail.
+	message.SetString(language.English, string(oracleErrors.LobValueInvalidated), "LOB value is invalid because its owner is no longer usable: %s")
 	// Document: No
 	// Cause:    The requested operation is not supported for this LOB locator or access mode.
 	// Action:   Use an operation supported by the selected LOB family.

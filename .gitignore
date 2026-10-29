@@ -1,3 +1,4 @@
 .idea
 .oca
 coverage/
+internal/driver/ttc/lob/doc.go

@@ -59,7 +59,7 @@ func (c *connection) ResetSession(ctx context.Context) error {
 	for _, statement := range statements {
 		if err := statement.Close(); err != nil {
 			common.Odl.Warn("Stale statement left in connection cannot be closed", "error", err)
-			c._isValid = false
+			c.invalidate()
 			return driver.ErrBadConn
 		}
 	}
