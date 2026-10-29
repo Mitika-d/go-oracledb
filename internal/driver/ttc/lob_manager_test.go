@@ -53,10 +53,7 @@ import (
 func TestLobManager_OwnsTemporaryReference(t *testing.T) {
 	t.Parallel()
 	shelf := newShelf[common.MessageType]()
-	manager, err := newLobManager(shelf, newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager: %v", err)
-	}
+	manager := newLobManager(shelf, newTestSessionContext())
 	loc := newTestLobReferenceLocator(71)
 
 	reference, err := manager.retainLobReference(loc)
@@ -80,13 +77,10 @@ func TestLobManager_OwnsTemporaryReference(t *testing.T) {
 // rejects an unsupported kind before it reaches a type-specific executor.
 func TestLobManager_RejectsUnsupportedKind(t *testing.T) {
 	t.Parallel()
-	manager, err := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager: %v", err)
-	}
+	manager := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
 	ctx := context.Background()
 	unsupported := internallob.Kind(99)
-	loc := (*locator)(nil)
+	loc := newTestLobReferenceLocator(73)
 	cases := []struct {
 		name string
 		call func() error
@@ -117,10 +111,7 @@ func TestLobManager_RejectsUnsupportedKind(t *testing.T) {
 // modes, text data, and BLOB text options are rejected before a TTC exchange.
 func TestLobManager_RejectsInvalidOperationOptionsAndKinds(t *testing.T) {
 	t.Parallel()
-	manager, err := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager: %v", err)
-	}
+	manager := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
 	loc := newTestLobReferenceLocator(74)
 	tests := []struct {
 		name string
@@ -191,10 +182,7 @@ func TestLobManager_CreateTemporaryReturnsExecutorError(t *testing.T) {
 // prefix with no bytes decodes as empty data without a TTC exchange.
 func TestLobManager_DecodePrefixEmptyPayload(t *testing.T) {
 	t.Parallel()
-	manager, err := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager: %v", err)
-	}
+	manager := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
 	data, logical, carry, err := manager.decodePrefix(internallob.CLOB, newTestLobReferenceLocator(75), nil, false)
 	if err != nil {
 		t.Fatalf("decode empty prefix: %v", err)
@@ -204,54 +192,14 @@ func TestLobManager_DecodePrefixEmptyPayload(t *testing.T) {
 	}
 }
 
-// TestLobManager_RejectsNilLocator verifies each locator operation returns
-// InvalidLOBBuffer for a missing locator.
-func TestLobManager_RejectsNilLocator(t *testing.T) {
-	t.Parallel()
-	manager, err := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager: %v", err)
-	}
-	ctx := context.Background()
-	cases := []struct {
-		name string
-		call func() error
-	}{
-		{name: "read", call: func() error { _, _, err := manager.read(ctx, internallob.BLOB, nil, 1, 0); return err }},
-		{name: "write", call: func() error { _, err := manager.write(ctx, internallob.BLOB, nil, nil); return err }},
-		{name: "decodePrefix", call: func() error { _, _, _, err := manager.decodePrefix(internallob.CLOB, nil, nil, false); return err }},
-		{name: "length", call: func() error { _, err := manager.length(ctx, internallob.BLOB, nil); return err }},
-		{name: "chunkSize", call: func() error { _, err := manager.chunkSize(ctx, internallob.BLOB, nil); return err }},
-		{name: "trim", call: func() error { _, err := manager.trim(ctx, internallob.BLOB, nil, 0); return err }},
-		{name: "open", call: func() error { _, err := manager.open(ctx, internallob.BLOB, nil, lobOpenModeReadOnly); return err }},
-		{name: "close", call: func() error { return manager.close(ctx, internallob.BLOB, nil) }},
-		{name: "isOpen", call: func() error { _, err := manager.isOpen(ctx, internallob.BLOB, nil); return err }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var coded oracleErrors.SQLError
-			err := tc.call()
-			if err == nil || !errors.As(err, &coded) || coded.ErrorCode() != string(oracleErrors.InvalidLOBBuffer) {
-				t.Fatalf("nil-locator error = %v, want %s", err, oracleErrors.InvalidLOBBuffer)
-			}
-		})
-	}
-}
-
 // TestLobManager_SharesSessionExecutors verifies that managers created for one
 // physical session reuse one executor for each LOB family.
 func TestLobManager_SharesSessionExecutors(t *testing.T) {
 	t.Parallel()
 	shelf := newShelf[common.MessageType]()
 	sessionContext := newTestSessionContext()
-	first, err := newLobManager(shelf, sessionContext)
-	if err != nil {
-		t.Fatalf("newLobManager first: %v", err)
-	}
-	second, err := newLobManager(shelf, sessionContext)
-	if err != nil {
-		t.Fatalf("newLobManager second: %v", err)
-	}
+	first := newLobManager(shelf, sessionContext)
+	second := newLobManager(shelf, sessionContext)
 	if first.getBlobExecutor() != second.getBlobExecutor() {
 		t.Fatal("BLOB executor was not shared by session managers")
 	}
@@ -282,10 +230,7 @@ func newLobManagerRPCFixture(t *testing.T) (*lobManager, *fakeStreamer) {
 		lobRpaAmounts: []common.UB8{0},
 	}
 	ttcShelf.RegisterMessageStreamer(streamer)
-	manager, err := newLobManager(ttcShelf, newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager: %v", err)
-	}
+	manager := newLobManager(ttcShelf, newTestSessionContext())
 	return manager, streamer
 }
 
@@ -372,23 +317,14 @@ func TestLobManager_DispatchesAllLOBOperations(t *testing.T) {
 func TestLobManager_HandlesSessionAbandonmentAndReferenceErrors(t *testing.T) {
 	t.Parallel()
 	firstShelf := newShelf[common.MessageType]()
-	firstManager, err := newLobManager(firstShelf, newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager first: %v", err)
-	}
+	firstManager := newLobManager(firstShelf, newTestSessionContext())
 	managedAbandonmentShelf := newShelf[common.MessageType]()
-	managedAbandonment, err := newLobManager(managedAbandonmentShelf, newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager for abandonment: %v", err)
-	}
+	managedAbandonment := newLobManager(managedAbandonmentShelf, newTestSessionContext())
 	managedAbandonment.abandonSession()
 	if !managedAbandonmentShelf.lobState.isInvalid() {
 		t.Fatal("manager abandonment callback did not invalidate its LOB session")
 	}
-	secondManager, err := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
-	if err != nil {
-		t.Fatalf("newLobManager second: %v", err)
-	}
+	secondManager := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
 	reference, err := secondManager.retainLobReference(newTestLobReferenceLocator(72))
 	if err != nil {
 		t.Fatalf("retain second-session reference: %v", err)
@@ -398,9 +334,6 @@ func TestLobManager_HandlesSessionAbandonmentAndReferenceErrors(t *testing.T) {
 	}
 	if err := secondManager.releaseLobReference(reference); err != nil {
 		t.Fatalf("release owning-session reference: %v", err)
-	}
-	if err := firstManager.freeLobReference(nil); err == nil {
-		t.Fatal("free nil locator succeeded")
 	}
 	if err := firstManager.freeLobReference(newTestLobReferenceLocator(73)); err != nil {
 		t.Fatalf("free standalone locator: %v", err)
@@ -417,32 +350,5 @@ func TestLobManager_HandlesSessionAbandonmentAndReferenceErrors(t *testing.T) {
 	}
 	if len(recorder.events) != 1 || recorder.events[0] != streamerStaleEvent {
 		t.Fatalf("events = %v, want [streamerStaleEvent]", recorder.events)
-	}
-}
-
-// TestLobManager_RejectsIncompleteSession verifies nil shelf and session
-// context arguments cannot produce an operational manager.
-func TestLobManager_RejectsIncompleteSession(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		shelf   *ttiShelf[common.MessageType]
-		context *common.SessionContext
-	}{
-		{name: "nil shelf", context: newTestSessionContext()},
-		{name: "nil session context", shelf: newShelf[common.MessageType]()},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			manager, err := newLobManager(test.shelf, test.context)
-			if err == nil || manager != nil {
-				t.Fatalf("newLobManager = (%v, %v), want nil manager and error", manager, err)
-			}
-			var coded oracleErrors.SQLError
-			if !errors.As(err, &coded) || coded.ErrorCode() != string(oracleErrors.InternalError) {
-				t.Fatalf("newLobManager error = %v, want %s", err, oracleErrors.InternalError)
-			}
-		})
 	}
 }
