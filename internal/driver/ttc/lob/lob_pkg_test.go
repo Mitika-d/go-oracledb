@@ -55,6 +55,11 @@ func TestMain(m *testing.M) {
 }
 
 var testCases = []oracleTest.CategorizedTestCase{
+	{Name: "TestNewPreparedReferencesValidatesOwner", Categories: "unitary", Exclusive: false, Fn: TestNewPreparedReferencesValidatesOwner},
+	{Name: "TestPreparedReferencesAddAndReleaseInReverseOrder", Categories: "unitary", Exclusive: false, Fn: TestPreparedReferencesAddAndReleaseInReverseOrder},
+	{Name: "TestPreparedReferencesRejectsInvalidOwnersAndReferences", Categories: "unitary", Exclusive: false, Fn: TestPreparedReferencesRejectsInvalidOwnersAndReferences},
+	{Name: "TestPreparedReferencesReleaseFailureAbandonsOwner", Categories: "unitary", Exclusive: false, Fn: TestPreparedReferencesReleaseFailureAbandonsOwner},
+	{Name: "TestPreparedReferencesAbandonAndNilSafeMethods", Categories: "unitary", Exclusive: false, Fn: TestPreparedReferencesAbandonAndNilSafeMethods},
 	{Name: "TestReferenceRegistryReferenceCountDefersFreeUntilLastAlias", Categories: "unitary", Exclusive: false, Fn: TestReferenceRegistryReferenceCountDefersFreeUntilLastAlias},
 	{Name: "TestReferenceRegistryRestoreAllowsRetryAndRetain", Categories: "unitary", Exclusive: false, Fn: TestReferenceRegistryRestoreAllowsRetryAndRetain},
 	{Name: "TestReferenceRegistryPayloadLimit", Categories: "unitary", Exclusive: false, Fn: TestReferenceRegistryPayloadLimit},

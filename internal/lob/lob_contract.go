@@ -36,13 +36,21 @@
 ** SOFTWARE.
  */
 
-// Package lob contains private, transport-neutral contracts shared by the
-// public oracle/datatype/lob package and the TTC implementation. Go's internal-package
-// rule prevents applications from importing these carriers directly.
+// Package lob contains private, transport-neutral contracts and bind marker
+// types used by the public oracle package and the TTC implementation. Go's
+// internal-package rule prevents applications from importing these carriers
+// directly.
 package lob
 
 import (
 	"context"
+	"io"
+)
+
+const (
+	// DefaultBlobLobChunkBytes is the bounded request size for BLOB reads and
+	// ordinary streamed BLOB bind writes.
+	DefaultBlobLobChunkBytes = 32 * 1024
 )
 
 // Kind identifies an Oracle LOB family without exposing TTC datatype numbers.
@@ -67,6 +75,27 @@ const (
 // Returns:
 //   - bool: true for BLOB, CLOB, or NCLOB.
 func ValidKind(kind Kind) bool { return kind == BLOB || kind == CLOB || kind == NCLOB }
+
+// LOBSource is the private, transport-neutral source behind typed datatype
+// scanners. It is shared only by driver packages; Go's internal-package rule
+// prevents applications from importing or implementing this contract.
+//
+// Read and WriteTo expose BLOB bytes or UTF-8 CLOB/NCLOB text. Size returns
+// the server's logical length, and Kind identifies the LOB family.
+type LOBSource interface {
+	// Read returns BLOB bytes or UTF-8 CLOB/NCLOB text from the sequential cursor.
+	Read([]byte) (int, error)
+	// WriteTo copies the remaining LOB value to writer.
+	WriteTo(io.Writer) (int64, error)
+	// Close releases this source's local ownership and buffered data.
+	Close() error
+	// Size returns bytes for BLOBs or UTF-16 logical units for text LOBs.
+	Size() (int64, error)
+	// ChunkSize returns the Oracle storage chunk size in bytes.
+	ChunkSize() (int64, error)
+	// Kind identifies the Oracle LOB family.
+	Kind() Kind
+}
 
 // LOBHandleDriver is the private low-level operation surface used by typed
 // connection-scoped LOB handles. Implementations use the owning physical

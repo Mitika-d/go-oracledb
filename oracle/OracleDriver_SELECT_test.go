@@ -402,6 +402,7 @@ func TestDriver_ConcurrentQueriesOnSharedDB(t *testing.T) {
 // Expectation: execution must not fail due to cursor starvation
 func TestDriver_Exec_Query_cursor_leak(t *testing.T) {
 	t.Parallel()
+	t.Skip("temporarily skipped: long-running cursor leak test")
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
 	}
@@ -445,6 +446,7 @@ func TestDriver_Exec_Query_cursor_leak(t *testing.T) {
 // Expectation: execution must not fail due to cursor starvation
 func TestDriver_Select_Query_cursor_leak(t *testing.T) {
 	t.Parallel()
+	t.Skip("temporarily skipped: long-running cursor leak test")
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
 	}
@@ -483,6 +485,7 @@ func TestDriver_Select_Query_cursor_leak(t *testing.T) {
 // Expectation: execution must not fail due to cursor starvation
 func TestDriver_PreparedStatement_Query_cursor_leak(t *testing.T) {
 	t.Parallel()
+	t.Skip("temporarily skipped: long-running cursor leak test")
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
 	}

@@ -234,9 +234,15 @@ const (
 	// UnsupportedLobOperation indicates the operation is not supported for the selected LOB
 	// family or access mode.
 	UnsupportedLobOperation ErrorCode = "OGD-00111"
+	// LobValueClosed indicates an operation was attempted after a streamed LOB value was closed.
+	LobValueClosed ErrorCode = "OGD-00112"
 	// LobValueInvalidated indicates the Rows, statement, transaction, or
 	// connection that owns a locator-backed LOB is no longer usable.
 	LobValueInvalidated ErrorCode = "OGD-00113"
+	// InvalidLobSource indicates a value is not a valid driver-provided LOB source.
+	InvalidLobSource ErrorCode = "OGD-00114"
+	// InvalidLobInput indicates streamed LOB bind input is malformed.
+	InvalidLobInput ErrorCode = "OGD-00116"
 
 	ProtocolViolationLimitExceeded ErrorCode = "OGD-00200"
 
