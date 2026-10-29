@@ -48,11 +48,10 @@ import (
 
 // *** Pinger ***
 
-// Ping pings the database to check if the connection is in a valid state
+// Ping pings the database to check if the connection is in a valid state.
 //
 // Returns: driver.ErrBadConn if the connection is not in a valid state,
-//
-//	otherwise nil
+// otherwise nil.
 func (c *connection) Ping(ctx context.Context) error {
 	err := c.runFunctionWithFunHeader(ctx, ping)
 	if err != nil {
@@ -72,9 +71,17 @@ const (
 //
 // Returns: true if the connection is valid otherwise false
 func (c *connection) IsValid() bool {
-
+	if c._isClosed || !c._isValid {
+		return false
+	}
 	// Check if inband notification has been received.
-	c._isValid = c._isValid && !c.ns.CheckInbandNotification()
-
+	if c.ns.CheckInbandNotification() {
+		// Revoke LOB state when the connection becomes unusable.
+		c.markInvalid()
+	}
+	// database/sql calls IsValid when releasing a driver connection. Expire LOB
+	// leases before it can be reused. Rows.Close on a dedicated *sql.Conn does
+	// not release that connection.
+	c.shelf.lobState.expireLeases()
 	return c._isValid
 }
