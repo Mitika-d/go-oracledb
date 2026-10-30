@@ -56,6 +56,20 @@ const (
 // Close closes the TTC connection. A timeout context is used to prevent this
 // method from blocking indefinitely
 func (c *connection) Close() error {
+	if c._isClosed {
+		return nil
+	}
+	c._isClosed = true
+	if c.shelf != nil && c.shelf.lobState != nil {
+		c.shelf.lobState.invalidate()
+	}
+	// LOGOFF/session teardown owns every remaining temporary LOB. Do not send a
+	// queued piggyback while closing the physical connection.
+	discardLobSessionState(c.shelf)
+	// Invalidate Rows so active operations observe that the physical session is
+	// closing before LOGOFF and network teardown begin.
+	c.shelf.getEventService().post(connectionClosedEvent)
+
 	var nsDisconnectErr error
 	common.Odl.Fine("Closing connection")
 	// Create a context with timeout, this context will prevent this action from
@@ -86,10 +100,6 @@ func (c *connection) Close() error {
 	case nsDisconnectErr = <-disconnect:
 		break
 	}
-
-	// Mark the connection as closed. This is done even if an error occurs.
-	c._isClosed = true
-	c.shelf.getEventService().post(connectionClosedEvent)
 
 	// Check if closing connection returned error and return error to caller
 	if ttcCloseErr != nil {

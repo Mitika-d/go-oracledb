@@ -516,6 +516,17 @@ func (l *locator) hasBytes() bool {
 	return l.locatorBytes != nil
 }
 
+// markReleased clears local temporary-locator state after the final local
+// reference is released and its server-side free has been queued.
+func (l *locator) markReleased() {
+	if l == nil || len(l.locatorBytes) <= koll4FlagOffset {
+		return
+	}
+	l.locatorBytes[koll1FlagOffset] &^= kolblAbstractLocatorFlag
+	l.locatorBytes[koll2FlagOffset] &^= kolblInitializedFlag
+	l.locatorBytes[koll4FlagOffset] &^= kolblTemporaryFlagByte | kolblOpenFlagByte | kolblReadWriteFlagByte
+}
+
 // isTemporaryLocator reports whether the provided locator references a temporary
 // LOB by inspecting the temporary flag stored in the koll4 offset.
 func (l *locator) isTemporaryLocator() bool {
