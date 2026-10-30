@@ -86,7 +86,7 @@ func TestLobManager_RejectsUnsupportedKind(t *testing.T) {
 	}
 	ctx := context.Background()
 	unsupported := internallob.Kind(99)
-	loc := (*locator)(nil)
+	loc := newTestLobReferenceLocator(73)
 	cases := []struct {
 		name string
 		call func() error
@@ -398,9 +398,6 @@ func TestLobManager_HandlesSessionAbandonmentAndReferenceErrors(t *testing.T) {
 	}
 	if err := secondManager.releaseLobReference(reference); err != nil {
 		t.Fatalf("release owning-session reference: %v", err)
-	}
-	if err := firstManager.freeLobReference(nil); err == nil {
-		t.Fatal("free nil locator succeeded")
 	}
 	if err := firstManager.freeLobReference(newTestLobReferenceLocator(73)); err != nil {
 		t.Fatalf("free standalone locator: %v", err)

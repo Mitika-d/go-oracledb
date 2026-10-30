@@ -40,6 +40,7 @@ package ttc
 
 import (
 	"context"
+	"reflect"
 	"unicode/utf8"
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
@@ -119,7 +120,7 @@ func (m *lobManager) createTemporary(ctx context.Context, kind internallob.Kind)
 	if err != nil {
 		return nil, err
 	}
-	return append(driverCommon.B1Array(nil), bytes...), nil
+	return bytes, nil
 }
 
 // read dispatches a bounded locator read and returns data with the Oracle
@@ -383,19 +384,24 @@ func validateTTCLobKindAndLocator(kind internallob.Kind, loc *locator) error {
 }
 
 // bindLOBLocatorValue converts a caller-owned locator into TTC bind metadata.
-// The locator must belong to this physical session; the caller retains its
-// lifetime after statement execution.
+// The locator must belong to this physical session; its lifetime remains owned
+// by the caller after statement execution.
 func (m *lobManager) bindLOBLocatorValue(value internallob.LOBLocatorBindValue) (lobLocatorBind, error) {
-	if value.SessionKey != m.shelf || len(value.Locator) == 0 || !internallob.ValidKind(value.Kind) {
+	if value.SessionKey == nil || !reflect.TypeOf(value.SessionKey).Comparable() ||
+		value.SessionKey != m.shelf || len(value.Locator) == 0 || !internallob.ValidKind(value.Kind) {
 		return lobLocatorBind{}, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB locator connection or metadata")
 	}
 	locator := append(driverCommon.B1Array(nil), value.Locator...)
-	bind := lobLocatorBind{locator: locator, kind: value.Kind}
+	bind := lobLocatorBind{
+		locator: locator,
+		kind:    value.Kind,
+	}
 	switch value.Kind {
 	case internallob.CLOB:
 		if len(locator) <= koll3FlagOffset {
 			return lobLocatorBind{}, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "CLOB locator")
 		}
+		// CLOB locators use the varying-width flag expected by the server.
 		locator[koll3FlagOffset] |= kolblVaryingWidthFlag
 		bind.charsetForm = driverCommon.UB1(FormChar)
 		bind.charsetID = m.sessionCtx.DriverCharacterSet()

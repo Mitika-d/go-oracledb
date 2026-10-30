@@ -106,7 +106,7 @@ func boundedClobReadAmount(requested driverCommon.UB8) driverCommon.UB8 {
 // logicalAmount returns the Oracle locator offset units represented by runes.
 // Oracle defines CLOB and NCLOB LOB-operation offsets and amounts in UCS-2
 // units, independent of their database or national character-set encodings.
-// It is used by streamed binds to verify each TTIRPA acknowledgement before
+// It is used by typed LOB writes to verify each TTIRPA acknowledgement before
 // advancing a locator offset.
 //
 // Parameters:
