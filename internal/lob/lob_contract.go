@@ -43,6 +43,18 @@ package lob
 
 import (
 	"context"
+	"io"
+)
+
+const (
+	// DefaultBlobLobChunkBytes is the bounded request size for BLOB reads and
+	// ordinary BLOB write operations.
+	DefaultBlobLobChunkBytes = 32 * 1024
+	// DefaultCharacterLobChunkUnits is the bounded request size for CLOB and
+	// NCLOB reads and writes, measured in Oracle UTF-16 logical units.
+	DefaultCharacterLobChunkUnits = 32 * 1024
+	// LOBOpenReadWrite is the private protocol mode used by typed LOB Open.
+	LOBOpenReadWrite = 2
 )
 
 // Kind identifies an Oracle LOB family without exposing TTC datatype numbers.
@@ -67,6 +79,17 @@ const (
 // Returns:
 //   - bool: true for BLOB, CLOB, or NCLOB.
 func ValidKind(kind Kind) bool { return kind == BLOB || kind == CLOB || kind == NCLOB }
+
+// LOBSource is the private, transport-neutral source behind typed datatype
+// scanners. Read and WriteTo expose BLOB bytes or UTF-8 CLOB/NCLOB text.
+type LOBSource interface {
+	Read([]byte) (int, error)
+	WriteTo(io.Writer) (int64, error)
+	Close() error
+	Size() (int64, error)
+	ChunkSize() (int64, error)
+	Kind() Kind
+}
 
 // LOBSession is the private lease-scoped operation surface used by typed
 // connection-scoped LOB handles. Implementations use the owning physical
@@ -224,16 +247,42 @@ type LOBSession interface {
 	AcquireLOBLease() (func(), error)
 }
 
-// LOBLocatorBindValue is a snapshot of a typed LOB locator for statement binding.
-// SessionKey prevents a locator from being bound through a different connection.
+// LOBHandleProvider creates a lease-scoped capability for a dedicated
+// database/sql connection. Implementations must not expose the underlying
+// driver connection through the returned capability.
+type LOBHandleProvider interface {
+	NewLOBSession() (LOBSession, error)
+}
+
+// PersistentLOBAdoption is the private locator capability transferred from a
+// query row to a public typed LOB value. The locator belongs to Session's
+// physical connection and must not be used with another connection.
+type PersistentLOBAdoption struct {
+	Session LOBSession
+	Locator []byte
+	Length  uint64
+	// Prefix contains already prefetched public bytes. Offset is the next
+	// one-based Oracle logical position after Prefix.
+	Prefix []byte
+	Offset uint64
+}
+
+// PersistentLocatorAdopter transfers a persistent query locator out of Rows
+// ownership. Implementations reject temporary and abstract locators.
+type PersistentLocatorAdopter interface {
+	AdoptPersistentLocator(Kind) (PersistentLOBAdoption, error)
+}
+
+// LOBLocatorBindValue carries a locator-backed LOB value into the driver bind
+// pipeline. SessionKey restricts the locator to the physical session that owns it.
 type LOBLocatorBindValue struct {
 	SessionKey any
 	Kind       Kind
 	Locator    []byte
 }
 
-// LOBLocatorBindValueProvider lets a typed LOB expose its locator to the driver
-// without materializing the LOB contents.
+// LOBLocatorBindValueProvider lets public typed LOB values provide their
+// connection-scoped locator to database/sql binding without materializing data.
 type LOBLocatorBindValueProvider interface {
 	DriverLOBLocatorBindValue() (LOBLocatorBindValue, error)
 }

@@ -42,16 +42,56 @@ import (
 	"bytes"
 	"context"
 	"database/sql/driver"
+	"errors"
 	"testing"
 
+	"github.com/oracle/go-oracledb/v26/internal/common"
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
 	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
 
-// TestLobBindPipeline_PrepareLOBLocatorBinds checks that typed LOB arguments
+type testLOBLocatorBindValueProvider struct {
+	value internallob.LOBLocatorBindValue
+	err   error
+}
+
+func (provider testLOBLocatorBindValueProvider) DriverLOBLocatorBindValue() (internallob.LOBLocatorBindValue, error) {
+	return provider.value, provider.err
+}
+
+// TestLobBindPipeline_CheckNamedValueAcceptsLocator verifies database/sql
+// preserves typed locator providers and that preparation reports provider errors.
+func TestLobBindPipeline_CheckNamedValueAcceptsLocator(t *testing.T) {
+	t.Parallel()
+
+	shelf := newShelf[driverCommon.MessageType]()
+	locator := internallob.LOBLocatorBindValue{
+		SessionKey: shelf,
+		Kind:       internallob.BLOB,
+		Locator:    []byte{1, 2, 3},
+	}
+	namedValue := &driver.NamedValue{Ordinal: 1, Value: testLOBLocatorBindValueProvider{value: locator}}
+	if err := checkNamedValue(namedValue); err != nil {
+		t.Fatalf("checkNamedValue(locator provider) returned error: %v", err)
+	}
+	if _, ok := namedValue.Value.(testLOBLocatorBindValueProvider); !ok {
+		t.Fatalf("checkNamedValue changed locator provider to %T", namedValue.Value)
+	}
+
+	providerErr := errors.New("locator unavailable")
+	namedValue = &driver.NamedValue{Ordinal: 1, Value: testLOBLocatorBindValueProvider{err: providerErr}}
+	if err := checkNamedValue(namedValue); err != nil {
+		t.Fatalf("checkNamedValue(locator provider error) = %v, want nil until preparation", err)
+	}
+	if _, _, err := prepareLOBLocatorBinds(shelf, newTestSessionContext(), []driver.NamedValue{*namedValue}); !errors.Is(err, providerErr) {
+		t.Fatalf("prepareLOBLocatorBinds(locator provider error) = %v, want %v", err, providerErr)
+	}
+}
+
+// TestLobBindPipeline_PrepareTypedLOBLocatorBinds checks that typed LOB arguments
 // are copied into TTC locator binds while the caller keeps ownership of them.
-func TestLobBindPipeline_PrepareLOBLocatorBinds(t *testing.T) {
+func TestLobBindPipeline_PrepareTypedLOBLocatorBinds(t *testing.T) {
 	t.Parallel()
 
 	shelf := newShelf[driverCommon.MessageType]()
@@ -118,9 +158,9 @@ func TestLobBindPipeline_PrepareLOBLocatorBinds(t *testing.T) {
 	}
 }
 
-// TestLobBindPipeline_RejectsForeignOrInvalidLocators ensures a locator cannot
+// TestLobBindPipeline_RejectsInvalidLocatorMetadata ensures a locator cannot
 // be bound through another session or with incomplete metadata.
-func TestLobBindPipeline_RejectsForeignOrInvalidLocators(t *testing.T) {
+func TestLobBindPipeline_RejectsInvalidLocatorMetadata(t *testing.T) {
 	t.Parallel()
 
 	shelf := newShelf[driverCommon.MessageType]()
@@ -132,6 +172,7 @@ func TestLobBindPipeline_RejectsForeignOrInvalidLocators(t *testing.T) {
 		{name: "foreign session", value: internallob.LOBLocatorBindValue{SessionKey: newShelf[driverCommon.MessageType](), Kind: internallob.BLOB, Locator: []byte{1}}},
 		{name: "missing locator", value: internallob.LOBLocatorBindValue{SessionKey: shelf, Kind: internallob.BLOB}},
 		{name: "invalid kind", value: internallob.LOBLocatorBindValue{SessionKey: shelf, Kind: internallob.Unknown, Locator: []byte{1}}},
+		{name: "uncomparable session key", value: internallob.LOBLocatorBindValue{SessionKey: []byte{1}, Kind: internallob.BLOB, Locator: []byte{1}}},
 	}
 	for _, test := range testCases {
 		test := test
@@ -143,6 +184,48 @@ func TestLobBindPipeline_RejectsForeignOrInvalidLocators(t *testing.T) {
 				requireErrorCode(t, err, oracleErrors.InvalidLobSource)
 			}
 		})
+	}
+}
+
+// TestLobBindPipeline_PrepareLOBLocatorBindsSkipsOrdinaryValues verifies
+// ordinary statements keep their original argument slice and need no work.
+func TestLobBindPipeline_PrepareLOBLocatorBindsSkipsOrdinaryValues(t *testing.T) {
+	t.Parallel()
+
+	args := []driver.NamedValue{{Ordinal: 1, Value: int64(7)}}
+	prepared, hasLocator, err := prepareLOBLocatorBinds(newShelf[driverCommon.MessageType](), newTestSessionContext(), args)
+	if err != nil || hasLocator || &prepared[0] != &args[0] {
+		t.Fatalf("ordinary bind preparation = (%v, %t, %v), want original args and no locator", prepared, hasLocator, err)
+	}
+}
+
+// TestLobBindPipeline_FinishLocatorBindExecution verifies only ambiguous
+// failures involving typed locators invalidate the physical session.
+func TestLobBindPipeline_FinishLocatorBindExecution(t *testing.T) {
+	t.Parallel()
+
+	t.Run("success", func(t *testing.T) {
+		shelf := newShelf[driverCommon.MessageType]()
+		if err := finishLOBLocatorBindExecution(shelf, true, nil); err != nil || shelf.lobState.isInvalid() {
+			t.Fatalf("successful locator execution = (%v, invalid %t)", err, shelf.lobState.isInvalid())
+		}
+	})
+	t.Run("terminal Oracle error", func(t *testing.T) {
+		shelf := newShelf[driverCommon.MessageType]()
+		serverErr := common.NewOracleError(oracleErrors.ErrorCode("ORA-00001"), nil)
+		if err := finishLOBLocatorBindExecution(shelf, true, serverErr); err != serverErr || shelf.lobState.isInvalid() {
+			t.Fatalf("terminal error result = (%v, invalid %t)", err, shelf.lobState.isInvalid())
+		}
+	})
+	t.Run("ambiguous transport error", func(t *testing.T) {
+		shelf := newShelf[driverCommon.MessageType]()
+		transportErr := common.NewOracleError(oracleErrors.StreamerReadError, errors.New("EOF"))
+		if err := finishLOBLocatorBindExecution(shelf, true, transportErr); err != transportErr || !shelf.lobState.isInvalid() {
+			t.Fatalf("transport error result = (%v, invalid %t)", err, shelf.lobState.isInvalid())
+		}
+	})
+	if isTerminalOracleError(common.NewOracleError(oracleErrors.RunExecError, common.NewOracleError(oracleErrors.ErrorCode("ORA-00001"), nil))) {
+		t.Fatal("wrapped Oracle error was treated as a terminal TTC response")
 	}
 }
 
@@ -220,5 +303,40 @@ func TestLobBindPipeline_ResendsOACWhenLOBCharsetChanges(t *testing.T) {
 
 	if !processor.needToSendOACs([]driverCommon.Marshallable{current}) {
 		t.Fatal("needToSendOACs = false, want resend when LOB character-set form changes")
+	}
+}
+
+// TestLobBindPipeline_FreeLobReferenceDefersAndInvalidatesLocator verifies
+// Free queues a temporary locator for piggybacking and clears its local flags.
+func TestLobBindPipeline_FreeLobReferenceDefersAndInvalidatesLocator(t *testing.T) {
+	t.Parallel()
+
+	shelf := newShelf[driverCommon.MessageType]()
+	streamer := NewMessageStreamer(shelf)
+	shelf.RegisterMessageStreamer(streamer)
+	loc := newTestLobReferenceLocator(101)
+	loc.locatorBytes[koll1FlagOffset] |= kolblAbstractLocatorFlag
+	loc.locatorBytes[koll4FlagOffset] |= kolblOpenFlagByte | kolblReadWriteFlagByte
+
+	manager := newLobManager(shelf, newTestSessionContext())
+	if err := manager.freeLobReference(loc); err != nil {
+		t.Fatalf("freeLobReference returned error: %v", err)
+	}
+	if streamer.outgoingMessages.Len() != 0 {
+		t.Fatal("freeLobReference sent a standalone TTC request")
+	}
+	if loc.locatorBytes[koll1FlagOffset]&kolblAbstractLocatorFlag != 0 ||
+		loc.locatorBytes[koll2FlagOffset]&kolblInitializedFlag != 0 ||
+		loc.locatorBytes[koll4FlagOffset]&(kolblTemporaryFlagByte|kolblOpenFlagByte|kolblReadWriteFlagByte) != 0 {
+		t.Fatalf("locator flags were not cleared: %v", loc.locatorBytes)
+	}
+	if err := manager.freeLobReference(loc); err == nil {
+		t.Fatal("second free accepted an already-freed locator")
+	}
+	if err := streamer.Push(context.Background(), &lobRegistryOrdinaryFunction{}); err != nil {
+		t.Fatalf("Push ordinary function: %v", err)
+	}
+	if streamer.outgoingMessages.Len() != 2 {
+		t.Fatalf("outgoing message count = %d, want piggyback plus ordinary function", streamer.outgoingMessages.Len())
 	}
 }

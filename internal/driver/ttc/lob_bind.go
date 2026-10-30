@@ -6,10 +6,10 @@
 ** Subject to the condition set forth below, permission is hereby granted to any
 ** person obtaining a copy of this software, associated documentation and/or data
 ** (collectively the "Software"), free of charge and under any and all copyright
-** rights and any and all patent rights owned or freely licensable by each licensor
-** hereunder covering either (i) the unmodified Software as contributed to or
-** provided by such licensor, or (ii) the Larger Works (as defined below), to deal
-** in both
+** rights owned by each licensor hereunder, and under any and all patent rights
+** owned or freely licensable by each licensor hereunder covering either (i) the
+** unmodified Software as contributed to or provided by such licensor, or (ii) the
+** Larger Works (as defined below), to deal in both
 **
 ** (a) the Software, and
 ** (b) any piece of software and/or hardware listed in the lrgrwrks.txt file if
@@ -18,14 +18,14 @@
 **
 ** without restriction, including without limitation the rights to copy, create
 ** derivative works of, display, perform, and distribute the Software and make,
-** use, sell, offer for sale, import, export, have made, and have sold the
-** Software and the Larger Work(s), and to sublicense the foregoing rights on
-** either these or other terms.
+** use, sell, offer for sale, import, export, have made, and have sold the Software
+** and the Larger Work(s), and to sublicense the foregoing rights on either these
+** or other terms.
 **
 ** This license is subject to the following condition:
 ** The above copyright notice and either this complete permission notice or at
-** a minimum a reference to the UPL must be included in all copies or
-** substantial portions of the Software.
+** a minimum a reference to the UPL must be included in all copies or substantial
+** portions of the Software.
 **
 ** THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 ** IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -122,8 +122,8 @@ func finishLOBLocatorBindExecution(
 // after the TTC exchange reached a terminal server response.
 func isTerminalOracleError(err error) bool {
 	for err != nil {
-		if sqlErr, ok := err.(oracleErrors.SQLError); ok && strings.HasPrefix(sqlErr.ErrorCode(), "ORA-") {
-			return true
+		if sqlErr, ok := err.(oracleErrors.SQLError); ok {
+			return strings.HasPrefix(sqlErr.ErrorCode(), "ORA-")
 		}
 		err = errors.Unwrap(err)
 	}
