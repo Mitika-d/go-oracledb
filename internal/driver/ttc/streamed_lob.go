@@ -197,6 +197,54 @@ func (lob *streamedLob) Kind() internallob.Kind {
 	return lob.kind
 }
 
+// AdoptPersistentLocator transfers this row's persistent locator into a
+// connection-lease capability for a public typed LOB value. The prefetched
+// prefix is copied into the typed value. If it ends with an unmatched UTF-16
+// high surrogate, it is discarded and the typed value starts at locator offset
+// one so text decoding remains valid. The caller must retain the dedicated
+// *sql.Conn until it is finished.
+func (lob *streamedLob) AdoptPersistentLocator(kind internallob.Kind) (internallob.PersistentLOBAdoption, error) {
+	lob.mu.Lock()
+	defer lob.mu.Unlock()
+	if err := lob.stateErrorLocked(); err != nil {
+		return internallob.PersistentLOBAdoption{}, err
+	}
+	if kind != lob.kind {
+		return internallob.PersistentLOBAdoption{}, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB kind mismatch")
+	}
+	if lob.locator == nil || lob.locator.isTemporaryLocator() || lob.locator.isAbstractLocator() {
+		return internallob.PersistentLOBAdoption{}, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "persistent locator required")
+	}
+	session, err := newLobLease(lob.owner.shelf, lob.owner.sessionContext)
+	if err != nil {
+		return internallob.PersistentLOBAdoption{}, err
+	}
+	if !lob.owner.detachLobForAdoption(lob) {
+		return internallob.PersistentLOBAdoption{}, common.NewOracleError(oracleErrors.LobValueInvalidated, nil, "Rows owner")
+	}
+	prefix := append([]byte(nil), lob.prefix...)
+	offset := uint64(lob.nextOffset)
+	if lob.pendingHighSurrogate != 0 {
+		prefix = nil
+		offset = 1
+	}
+	if offset == 0 {
+		offset = 1
+	}
+	adoption := internallob.PersistentLOBAdoption{
+		Session: session,
+		Locator: append([]byte(nil), lob.locator.locatorBytes...),
+		Length:  uint64(lob.totalLength),
+		Prefix:  prefix,
+		Offset:  offset,
+	}
+	lob.closed = true
+	lob.prefix = nil
+	lob.pending = nil
+	lob.pendingHighSurrogate = 0
+	return adoption, nil
+}
+
 // Read implements io.Reader. It returns inline row data before issuing bounded
 // locator RPCs.
 //

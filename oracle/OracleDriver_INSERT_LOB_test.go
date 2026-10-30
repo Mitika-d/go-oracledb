@@ -45,6 +45,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	lobpkg "github.com/oracle/go-oracledb/v26/oracle/datatype/lob"
 )
 
 type clobRowData struct {
@@ -230,14 +232,14 @@ func runPreparedInsertClob(t *testing.T, table string, rows []clobRowData) {
 		if len(rr.c) > prefetchSize {
 			t.Skip()
 		}
-		var gotClob string
+		var gotClob lobpkg.Text
 		err = db.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT clob FROM %s WHERE id = %d", table, rr.id),
 		).Scan(&gotClob)
 		if err != nil {
 			t.Fatalf("select inserted row failed for id=%d: %v", rr.id, err)
 		}
-		if gotClob != rr.c {
+		if string(gotClob) != rr.c {
 			t.Fatalf("unexpected clob for id=%d: got length %d want %d", rr.id, len(gotClob), len(rr.c))
 		}
 	}
@@ -303,7 +305,7 @@ func runPreparedInsertBlob(t *testing.T, table string, rows []blobRowData) {
 		if len(rr.b) > 33554432 {
 			t.Skip()
 		}
-		var gotBlob []byte
+		var gotBlob lobpkg.Bytes
 		err = db.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT blob FROM %s WHERE id = %d", table, rr.id),
 		).Scan(&gotBlob)

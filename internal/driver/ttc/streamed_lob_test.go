@@ -178,6 +178,37 @@ func newTestStreamedClob(t *testing.T, rows *ttcRows, length driverCommon.UB8, p
 	}, streamer
 }
 
+// TestStreamedLob_AdoptPersistentLocatorTransfersRowsOwnership verifies a
+// typed scanner can keep a persistent locator usable after Rows.Close while
+// the owning physical-session lease remains active.
+func TestStreamedLob_AdoptPersistentLocatorTransfersRowsOwnership(t *testing.T) {
+	t.Parallel()
+	rows := newLobTestRows()
+	rows.setSessionContext(newTestSessionContext())
+	value, _ := newTestStreamedBlob(t, rows, 8, []byte("pref"))
+
+	adoption, err := value.AdoptPersistentLocator(internallob.BLOB)
+	if err != nil {
+		t.Fatalf("AdoptPersistentLocator() error = %v", err)
+	}
+	if string(adoption.Prefix) != "pref" || adoption.Offset != 5 {
+		t.Fatalf("adopted prefix/offset = (%q, %d), want (%q, 5)", adoption.Prefix, adoption.Offset, "pref")
+	}
+	if !value.closed {
+		t.Fatal("streamed locator remained open after adoption")
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("Rows.Close() error = %v", err)
+	}
+	if err := adoption.Session.ValidateLOBLease(); err != nil {
+		t.Fatalf("adopted lease invalid after Rows.Close(): %v", err)
+	}
+	rows.shelf.lobState.expireLeases()
+	if err := adoption.Session.ValidateLOBLease(); err == nil {
+		t.Fatal("adopted lease remained valid after physical connection lease expired")
+	}
+}
+
 // TestStreamedLob_ReadStreamsPrefixAndLocatorChunks verifies that Read serves
 // inline BLOB data first and then uses a length-bounded locator refill.
 func TestStreamedLob_ReadStreamsPrefixAndLocatorChunks(t *testing.T) {
