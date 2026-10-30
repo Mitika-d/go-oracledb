@@ -18,6 +18,7 @@ Oracle Database Driver for Go is a native Go driver for Go's [database/sql](http
   - Native Oracle JSON support via `github.com/oracle/go-oracledb/v26/oracle/datatype/json`
   - BLOB support using prefetch and returning `[]byte`
   - CLOB support using prefetch and returning `string`
+  - Typed locator-backed BLOB, CLOB, and NCLOB values via `oracle/datatype/lob`
 
 ## Installation
 Run:
@@ -235,6 +236,10 @@ Errors are returned as `oracle.SQLError` which implements Go's `Error` interface
 
 ## Data-type support
 
+For locator-backed LOB reads and writes, use the typed API documented in
+[`documentation/lob.md`](documentation/lob.md). A typed locator must be used
+while its dedicated `*sql.Conn` remains open.
+
 ### Character and Text Types
 
 | Oracle Type  | Driver returns       |
@@ -244,8 +249,8 @@ Errors are returned as `oracle.SQLError` which implements Go's `Error` interface
 | `VARCHAR2`   | `string`             |
 | `NVARCHAR2`  | `string`             |
 | `LONG`       | `string` or `[]byte` |
-| `CLOB`       | `string` or `[]byte` |
-| `NCLOB`      | `string`             |
+| `CLOB`       | `lob.Text` for materialized UTF-8 text; optional `lob.Clob` locator scan |
+| `NCLOB`      | `lob.Text` for materialized UTF-8 text; optional `lob.NClob` locator scan |
 | `XMLTYPE`    | `string`             |
 
 
@@ -285,7 +290,7 @@ Errors are returned as `oracle.SQLError` which implements Go's `Error` interface
 |-------------|----------------|
 | `RAW`       | `[]byte`       |
 | `LONG RAW`  | `[]byte`       |
-| `BLOB`      | `[]byte`       |
+| `BLOB`      | `lob.Bytes` for materialized bytes; optional `lob.Blob` locator scan |
 | `BFILE`     | `[]byte`       |
 
 ---

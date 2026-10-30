@@ -510,20 +510,20 @@ DecodeClob decodes a TTC CLOB/NCLOB payload into a Go string.
 
 Description:
 
-	Decodes prefetched text LOB payloads using the LOB-specific charset metadata when available.
+	Decodes prefetched text LOB payloads using their LOB-specific charset metadata.
 	AL16UTF16 payloads are decoded as big-endian UTF-16, while other payloads are treated as
 	UTF-8 compatible text.
 
 Parameters:
-  - columnContext: Column metadata, including optional LOB charset information in LobContext.
+  - columnContext: Column metadata with the CLOB/NCLOB charset information in LobContext.
   - data: Raw prefetched TTC payload bytes for the LOB column.
 
 Returns:
   - driver.Value: A Go string containing the decoded CLOB/NCLOB text.
-  - error: Always nil.
+  - error: A UTF-16 decoding error when the payload is malformed.
 
 Errors:
-  - None.
+  - A malformed UTF-16 payload returns the conversion error.
 */
 func DecodeClob(columnContext columnContext, value any) (driver.Value, error) {
 	data, err := rawColumnData(value)
@@ -708,10 +708,16 @@ func GetScanTypeForJsonColumn(_ columnContext) reflect.Type {
 	return reflect.TypeFor[json.JSON]()
 }
 
+// GetScanTypeForCLOBColumn returns string as the materialized scan type for a
+// CLOB column. Reader mode reports any separately so the public datatype
+// scanner can adopt its locator source during Scan.
 func GetScanTypeForCLOBColumn(_ columnContext) reflect.Type {
 	return reflect.TypeFor[string]()
 }
 
+// GetScanTypeForBLOBColumn returns []byte as the materialized scan type for a
+// BLOB column. Reader mode reports any separately so the public datatype
+// scanner can adopt its locator source during Scan.
 func GetScanTypeForBLOBColumn(_ columnContext) reflect.Type {
 	return reflect.TypeFor[[]byte]()
 }

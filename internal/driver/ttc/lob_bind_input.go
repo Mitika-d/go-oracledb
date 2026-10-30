@@ -149,8 +149,9 @@ func lobBindInputFromValue(value any) (lobBindInput, bool) {
 	}
 }
 
-// validateLobBindArgs validates streamed inputs without consuming a source. It
-// returns the first LOB bind argument index, or -1 when none is present.
+// validateLobBindArgs validates streamed inputs and locator values without
+// consuming a source. It returns the first LOB bind argument index, or -1 when
+// none is present.
 //
 // Parameters:
 //   - args: normalized statement arguments to validate.
@@ -161,17 +162,23 @@ func lobBindInputFromValue(value any) (lobBindInput, bool) {
 func validateLobBindArgs(args []driver.NamedValue) (int, error) {
 	firstLobBindIndex := -1
 	for index := range args {
-		input, ok := args[index].Value.(lobBindInput)
-		if !ok {
-			continue
-		}
-		if firstLobBindIndex < 0 {
-			firstLobBindIndex = index
-		}
-		// Validate every carrier before preparation can consume any reader. This
-		// keeps an invalid later bind from leaving an earlier reader partially used.
-		if err := input.validate(); err != nil {
-			return -1, err
+		switch value := args[index].Value.(type) {
+		case lobBindInput:
+			if firstLobBindIndex < 0 {
+				firstLobBindIndex = index
+			}
+			// Validate every carrier before preparation can consume any reader. This
+			// keeps an invalid later bind from leaving an earlier reader partially used.
+			if err := value.validate(); err != nil {
+				return -1, err
+			}
+		case internallob.LOBLocatorBindValue:
+			if firstLobBindIndex < 0 {
+				firstLobBindIndex = index
+			}
+			if value.SessionKey == nil || len(value.Locator) == 0 || !internallob.ValidKind(value.Kind) {
+				return -1, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB locator bind")
+			}
 		}
 	}
 	return firstLobBindIndex, nil

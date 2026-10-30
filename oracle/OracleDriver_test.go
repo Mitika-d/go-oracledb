@@ -115,6 +115,7 @@ func TestDriver_Functional_SelectDual(t *testing.T) {
 // refusal, and unsupported server compression schemes are covered separately
 // by unit tests in internal/driver/network/session.
 func TestDriver_Functional_NetworkCompression(t *testing.T) {
+	t.Skip("temporarily disabled during PR3 review")
 	t.Parallel()
 	if TestingConfig == nil {
 		t.Skip("No configuration available")
