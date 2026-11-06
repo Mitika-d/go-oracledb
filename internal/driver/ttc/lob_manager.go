@@ -40,6 +40,7 @@ package ttc
 
 import (
 	"context"
+	"database/sql/driver"
 	"unicode/utf8"
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
@@ -56,22 +57,16 @@ type lobManager struct {
 	sessionCtx *driverCommon.SessionContext
 }
 
-// newLobManager creates a LOB manager for a session. A manager may be retained
-// by a typed LOB lease or used for one statement or row operation. Its session
-// context belongs to the caller; executors and temporary-LOB state belong to
-// the shared shelf.
+// newLobManager creates a LOB manager bound to one session shelf and its
+// negotiated character-set context. Callers supply valid session state.
 //
 // Returns:
-//   - *lobManager: manager bound to the supplied shelf and session context.
-//   - error: InternalError when shelf or sessionCtx is nil.
-func newLobManager(shelf *ttiShelf[driverCommon.MessageType], sessionCtx *driverCommon.SessionContext) (*lobManager, error) {
-	if shelf == nil || sessionCtx == nil {
-		return nil, common.NewOracleError(oracleErrors.InternalError, nil)
-	}
+//   - *lobManager: manager bound to the supplied session.
+func newLobManager(shelf *ttiShelf[driverCommon.MessageType], sessionCtx *driverCommon.SessionContext) *lobManager {
 	return &lobManager{
 		shelf:      shelf,
 		sessionCtx: sessionCtx,
-	}, nil
+	}
 }
 
 // abandonSession lets execution-scoped cleanup abandon this manager's session.
@@ -119,7 +114,7 @@ func (m *lobManager) createTemporary(ctx context.Context, kind internallob.Kind)
 	if err != nil {
 		return nil, err
 	}
-	return append(driverCommon.B1Array(nil), bytes...), nil
+	return bytes, nil
 }
 
 // read dispatches a bounded locator read and returns data with the Oracle
@@ -144,7 +139,7 @@ func (m *lobManager) read(
 	amount driverCommon.UB8,
 	prefixHighSurrogate uint16,
 ) ([]byte, driverCommon.UB8, error) {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return nil, 0, err
 	}
 	if kind == internallob.BLOB {
@@ -169,7 +164,7 @@ func (m *lobManager) read(
 //   - driverCommon.UB8: logical units acknowledged by Oracle.
 //   - error: validation, write-RPC, or locator-kind error.
 func (m *lobManager) write(ctx context.Context, kind internallob.Kind, loc *locator, data []byte) (driverCommon.UB8, error) {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return 0, err
 	}
 	if kind == internallob.BLOB {
@@ -189,9 +184,6 @@ func (m *lobManager) decodePrefix(kind internallob.Kind, loc *locator, payload [
 	if kind != internallob.CLOB && kind != internallob.NCLOB {
 		return nil, 0, 0, common.NewOracleError(oracleErrors.UnsupportedLobOperation, nil, "LOB kind")
 	}
-	if err := validateTTCLobLocator(loc); err != nil {
-		return nil, 0, 0, err
-	}
 	data, logical, carry, err := m.getClobExecutor().decodeReadPayload(loc, kind == internallob.NCLOB, payload, 0, allowTrailingHighSurrogate)
 	return data, logical, carry, err
 }
@@ -207,7 +199,7 @@ func (m *lobManager) decodePrefix(kind internallob.Kind, loc *locator, payload [
 //   - driverCommon.UB8: bytes for BLOB or UTF-16 units for CLOB and NCLOB.
 //   - error: validation, length-RPC, or locator-kind error.
 func (m *lobManager) length(ctx context.Context, kind internallob.Kind, loc *locator) (driverCommon.UB8, error) {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return 0, err
 	}
 	if kind == internallob.BLOB {
@@ -227,7 +219,7 @@ func (m *lobManager) length(ctx context.Context, kind internallob.Kind, loc *loc
 //   - driverCommon.UB8: server storage chunk size.
 //   - error: validation, RPC, or locator-kind error.
 func (m *lobManager) chunkSize(ctx context.Context, kind internallob.Kind, loc *locator) (driverCommon.UB8, error) {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return 0, err
 	}
 	if kind == internallob.BLOB {
@@ -248,7 +240,7 @@ func (m *lobManager) chunkSize(ctx context.Context, kind internallob.Kind, loc *
 //   - driverCommon.UB8: server-reported resulting logical length.
 //   - error: validation, trim-RPC, or locator-kind error.
 func (m *lobManager) trim(ctx context.Context, kind internallob.Kind, loc *locator, length driverCommon.UB8) (driverCommon.UB8, error) {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return 0, err
 	}
 	if kind == internallob.BLOB {
@@ -269,7 +261,7 @@ func (m *lobManager) trim(ctx context.Context, kind internallob.Kind, loc *locat
 //   - bool: true when this call changed server state.
 //   - error: validation, open-RPC, or locator-kind error.
 func (m *lobManager) open(ctx context.Context, kind internallob.Kind, loc *locator, mode lobOpenMode) (bool, error) {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return false, err
 	}
 	if mode != lobOpenModeReadOnly && mode != lobOpenModeReadWrite {
@@ -291,7 +283,7 @@ func (m *lobManager) open(ctx context.Context, kind internallob.Kind, loc *locat
 // Returns:
 //   - error: validation, close-RPC, or locator-kind error.
 func (m *lobManager) close(ctx context.Context, kind internallob.Kind, loc *locator) error {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return err
 	}
 	if kind == internallob.BLOB {
@@ -311,7 +303,7 @@ func (m *lobManager) close(ctx context.Context, kind internallob.Kind, loc *loca
 //   - bool: current server-side open state.
 //   - error: validation, RPC, or locator-kind error.
 func (m *lobManager) isOpen(ctx context.Context, kind internallob.Kind, loc *locator) (bool, error) {
-	if err := validateTTCLobKindAndLocator(kind, loc); err != nil {
+	if err := validateTTCLobKind(kind); err != nil {
 		return false, err
 	}
 	if kind == internallob.BLOB {
@@ -365,19 +357,151 @@ func validateTTCLobKind(kind internallob.Kind) error {
 	return nil
 }
 
-// validateTTCLobLocator rejects a missing locator before TTC dispatch.
-func validateTTCLobLocator(loc *locator) error {
-	if loc == nil {
-		return common.NewOracleError(oracleErrors.InvalidLOBBuffer, nil, "LOB locator")
+// --- Streamed bind preparation ---
+
+// prepareBinds performs temporary creation, streaming, reference retention, and
+// failure abandonment as one ownership transaction. args must already be
+// normalized and validated; firstLobBindIndex is the index returned by that
+// validation pass. The statement layer receives locator bind values and an
+// opaque cleanup owner.
+//
+// Parameters:
+//   - ctx: context for temporary-LOB creation and streaming RPCs.
+//   - args: normalized statement arguments containing validated LOB inputs.
+//   - firstLobBindIndex: index of the first streamed LOB input.
+//
+// Returns:
+//   - []driver.NamedValue: copied arguments with streamed inputs replaced by locator binds.
+//   - *preparedLobBinds: owner of locators created during preparation.
+//   - error: preparation or cleanup-registration error.
+func (m *lobManager) prepareBinds(ctx context.Context, args []driver.NamedValue, firstLobBindIndex int) ([]driver.NamedValue, *preparedLobBinds, error) {
+	// Keep statement arguments separate from the caller's slice because each LOB
+	// marker is replaced with a locator-backed bind value.
+	prepared := append([]driver.NamedValue(nil), args...)
+	preparedBinds := &preparedLobBinds{manager: m}
+	for index := firstLobBindIndex; index < len(prepared); index++ {
+		input, ok := prepared[index].Value.(lobBindInput)
+		if !ok {
+			continue
+		}
+		// Materialize the input before the statement encoder sees it, and retain
+		// the locator before handling either success or a post-create error.
+		bind, loc, disposition, err := m.streamInput(ctx, input)
+		if loc != nil {
+			if retainErr := preparedBinds.add(loc); retainErr != nil {
+				// Without a stable LOB ID the locator cannot be queued safely. Tear
+				// down the physical session rather than issuing a standalone free.
+				preparedBinds.abandon()
+				return nil, nil, retainErr
+			}
+		}
+		if err != nil {
+			// A completed exchange can queue cleanup; an ambiguous exchange must
+			// abandon the physical session instead.
+			if disposition == lobCleanupFreeNow {
+				if cleanupErr := preparedBinds.free(); cleanupErr != nil {
+					common.Odl.Error("temporary LOB cleanup after bind failure failed", "error", cleanupErr)
+				}
+			} else {
+				preparedBinds.abandon()
+			}
+			return nil, nil, err
+		}
+		// The statement encoder will turn this private value into LOB-specific
+		// RXD and OAC data.
+		prepared[index].Value = bind
 	}
-	return nil
+	return prepared, preparedBinds, nil
 }
 
-// validateTTCLobKindAndLocator checks the two inputs shared by locator RPCs
-// before selecting a type-specific executor.
-func validateTTCLobKindAndLocator(kind internallob.Kind, loc *locator) error {
-	if err := validateTTCLobKind(kind); err != nil {
-		return err
+// streamInput creates, fills, and describes one temporary LOB.
+//
+// Parameters:
+//   - ctx: context for creation and write RPCs.
+//   - input: validated application input stream.
+//
+// Returns:
+//   - lobLocatorBind: RXD and OAC metadata after a successful stream.
+//   - *locator: created locator as soon as ownership exists.
+//   - lobCleanupDisposition: safe cleanup action if an error follows creation.
+//   - error: creation, input, encoding, or write failure.
+func (m *lobManager) streamInput(
+	ctx context.Context,
+	input lobBindInput,
+) (bind lobLocatorBind, loc *locator, disposition lobCleanupDisposition, err error) {
+	switch input.kind {
+	case internallob.BLOB:
+		// Create a session-duration temporary BLOB and retain the executor used for
+		// all writes in this bind.
+		executor := m.getBlobExecutor()
+		locatorBytes, createErr := executor.createTemporaryLob(ctx, false, durationSession)
+		if createErr != nil {
+			return bind, nil, lobCleanupAbandon, createErr
+		}
+		loc = newLocator(append(driverCommon.B1Array(nil), locatorBytes...), 1)
+		write := func(ctx context.Context, loc *locator, payload driverCommon.B1Array) (driverCommon.UB8, error) {
+			return executor.write(ctx, loc, payload)
+		}
+		if disposition, err = streamBlobInput(ctx, write, loc, input); err != nil {
+			return bind, loc, disposition, err
+		}
+		// Make an empty temporary BLOB explicitly non-NULL before binding it.
+		// Oracle can represent a newly-created but untouched temporary locator as
+		// SQL NULL when it is bound. An explicit zero-length trim preserves the
+		// public BindBlob([]byte{}) contract as an empty, non-NULL BLOB.
+		if loc.offset == 1 {
+			if _, trimErr := executor.trim(ctx, loc, 0); trimErr != nil {
+				return bind, loc, lobCleanupAbandon, trimErr
+			}
+		}
+		// Borrow the locator bytes until RXD encoding takes its independent snapshot.
+		bind = lobLocatorBind{locator: loc.locatorBytes, kind: input.kind}
+		return bind, loc, lobCleanupFreeNow, nil
+
+	case internallob.CLOB, internallob.NCLOB:
+		// Select character form and charset metadata before creating the temporary
+		// locator. The same CLOB executor serves both CLOB and NCLOB operations.
+		isNClob := input.kind == internallob.NCLOB
+		form := driverCommon.UB2(FormChar)
+		charsetID := m.sessionCtx.DriverCharacterSet()
+		if isNClob {
+			form = driverCommon.UB2(FormNChar)
+			charsetID = m.sessionCtx.SessionNCharCharacterSet()
+		}
+		executor := m.getClobExecutor()
+		locatorBytes, createErr := executor.createTemporaryLob(ctx, false, durationSession, form)
+		if createErr != nil {
+			return bind, nil, lobCleanupAbandon, createErr
+		}
+		loc = newLocator(append(driverCommon.B1Array(nil), locatorBytes...), 1)
+		// CLOB uses the varying-width flag for the negotiated AL32UTF8 path;
+		// NCLOB retains its national-character locator metadata.
+		if !isNClob {
+			loc.locatorBytes[koll3FlagOffset] |= kolblVaryingWidthFlag
+		}
+		write := func(ctx context.Context, loc *locator, isNClob bool, runes []rune) (driverCommon.UB8, error) {
+			return executor.write(ctx, loc, isNClob, runes, len(runes))
+		}
+		if disposition, err = streamClobInput(ctx, write, executor.logicalAmount, loc, input, isNClob); err != nil {
+			return bind, loc, disposition, err
+		}
+		// Preserve the non-NULL meaning of an explicitly empty character LOB.
+		// See the BLOB branch above. This applies equally to CLOB and NCLOB;
+		// zero is expressed in their UTF-16 logical-unit offset space.
+		if loc.offset == 1 {
+			if _, trimErr := executor.trim(ctx, loc, 0); trimErr != nil {
+				return bind, loc, lobCleanupAbandon, trimErr
+			}
+		}
+		// Carry the character form and charset ID into the LOB-specific OAC.
+		bind = lobLocatorBind{
+			locator:     loc.locatorBytes,
+			kind:        input.kind,
+			charsetForm: driverCommon.UB1(form),
+			charsetID:   charsetID,
+		}
+		return bind, loc, lobCleanupFreeNow, nil
+	default:
+		return bind, nil, lobCleanupFreeNow, common.NewOracleError(oracleErrors.InvalidLobInput, nil, "LOB kind")
 	}
-	return validateTTCLobLocator(loc)
 }

@@ -43,6 +43,7 @@ import (
 	"database/sql/driver"
 	"io"
 	"reflect"
+	"sync"
 	"time"
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
@@ -52,21 +53,23 @@ import (
 
 /*
 lobColumnContext captures LOB-specific metadata needed to decode pre-fetched
-LOB payloads.
+LOB payloads and locator-backed values.
 
 Description:
 
-	LOB columns carry additional metadata beyond the generic columnContext fields.
-	This metadata describes the LOB character set for text-based LOBs and the
-	server-provided prefetch details used when the row already includes LOB data.
+	LOB columns carry metadata beyond the generic columnContext fields. It
+	provides character-set information and locators for streamed BLOB/CLOB values,
+	plus RXD prefetch fields used by JSON values.
 
 Fields:
   - CharsetForm: Oracle character set form for the LOB payload (for example, database or national character set).
   - CharsetID: Oracle character set identifier used to decode textual LOB payloads.
-  - LobLength: Total logical length of the LOB value reported by the server.
-  - PrefetchLength: Number of bytes included inline with the row as pre-fetched LOB data.
-  - PrefetchChunkSize: Suggested chunk size for subsequent LOB reads when additional data must be fetched.
-  - LobLocator: Opaque locator bytes that identify the server-side LOB and allow follow-up read operations.
+  - LobLength: RXD length field used by the JSON payload path.
+  - PrefetchLength: Prefetched JSON byte length.
+  - PrefetchChunkSize: Prefetch chunk size carried in JSON RXD metadata.
+  - LobLocator: Opaque server locator used for follow-up reads.
+  - LocatorByteLength: BLOB/CLOB/NCLOB locator byte length encoded in RXD.
+  - TotalLobLength: Logical content length reported by the server (BLOB bytes; CLOB/NCLOB UTF-16 units).
 */
 type lobColumnContext struct {
 	CharsetForm       driverCommon.UB1
@@ -75,6 +78,10 @@ type lobColumnContext struct {
 	PrefetchLength    driverCommon.UB8
 	PrefetchChunkSize driverCommon.UB4
 	LobLocator        driverCommon.B1Array
+	// LocatorByteLength is the locator representation length encoded in RXD.
+	LocatorByteLength driverCommon.UB4
+	// TotalLobLength is the server-reported logical length of the LOB.
+	TotalLobLength driverCommon.UB8
 }
 
 // columnContext aggregates the metadata required to interpret a column's value
@@ -104,10 +111,26 @@ type columnContext struct {
 	serverTimeZoneOffset int16
 }
 
+// rowsLifecycle groups the state that controls whether Rows and its
+// locator-backed values may continue to use the physical session. It is
+// protected by ttcRows.mu.
+type rowsLifecycle struct {
+	// closed makes Close idempotent and invalidates child locators.
+	closed bool
+	// ctx follows the caller's QueryContext and cancel stops queued or in-flight
+	// locator work when Rows closes.
+	ctx    context.Context
+	cancel context.CancelFunc
+	// statement is the Statement which produced this result. ownsStatement is
+	// true only for the direct Connection.QueryContext path.
+	statement     *Statement
+	ownsStatement bool
+}
+
 // ttcRows implements database/sql/driver.Rows and optional ColumnType* interfaces.
 // It buffers row data as raw protocol B1Array slices and exposes column metadata
-// via the RowsColumnType* methods. Values returned by Next are currently []byte
-// for each column; ColumnTypeScanType reflects this choice until type mapping evolves.
+// via the RowsColumnType* methods. Locator-backed LOB values remain usable while
+// their Rows and physical session remain open.
 //
 // Implemented interfaces:
 //   - driver.Rows
@@ -117,6 +140,13 @@ type columnContext struct {
 //   - RowsColumnTypePrecisionScale
 //   - RowsColumnTypeScanType
 type ttcRows struct {
+	// mu protects lifecycle and row index, and snapshots row buffers while Close
+	// clears them. Do not hold it while calling Statement or streamedLob methods
+	// or performing TTC cleanup.
+	mu sync.Mutex
+	// lifecycle tracks query ownership and cancellation.
+	lifecycle rowsLifecycle
+
 	// row buffer
 	rowData       [][]columnPayload
 	currentRowIdx int
@@ -125,6 +155,9 @@ type ttcRows struct {
 	// metadata caches for ColumnType* interfaces
 	columnContexts []columnContext
 	shelf          *ttiShelf[driverCommon.MessageType]
+	// sessionContext supplies negotiated database and national character sets to
+	// the existing clobExecutor.
+	sessionContext *driverCommon.SessionContext
 
 	strictNullHandlingValue bool
 }
@@ -136,6 +169,34 @@ func (r *ttcRows) SetShelf(shelf *ttiShelf[driverCommon.MessageType]) {
 	r.strictNullHandlingValue = true
 	if r.shelf.Shelf.GetConnectionProperties() != nil {
 		r.strictNullHandlingValue = r.shelf.Shelf.GetConnectionProperties().IsStrictNullValueHandling()
+	}
+}
+
+// setSessionContext injects immutable negotiated character-set state used by
+// locator-backed CLOB and NCLOB values.
+//
+// Parameters:
+//   - sessionContext: negotiated database and national character-set state.
+func (r *ttcRows) setSessionContext(sessionContext *driverCommon.SessionContext) {
+	r.sessionContext = sessionContext
+}
+
+// setContext gives Rows a lifecycle context derived from the original public
+// QueryContext context, not the statement's exchange-only child context.
+//
+// Parameters:
+//   - parent: caller's query context.
+func (r *ttcRows) setContext(parent context.Context) {
+	r.mu.Lock()
+	oldCancel := r.lifecycle.cancel
+	r.lifecycle.ctx, r.lifecycle.cancel = context.WithCancel(parent)
+	closed := r.lifecycle.closed
+	if closed {
+		r.lifecycle.cancel()
+	}
+	r.mu.Unlock()
+	if oldCancel != nil {
+		oldCancel()
 	}
 }
 
@@ -151,48 +212,120 @@ func (r *ttcRows) Columns() []string {
 	return res
 }
 
-// Next implements driver.Rows.Next. It advances the cursorId and assigns each
-// column's payload as a value in dest. Row count is
-// computed once and cached to avoid repeated len() calls.
+// Next implements driver.Rows.Next. It snapshots the current row while holding
+// mu, then decodes outside the lock so Close can clear the parent result buffer.
 func (r *ttcRows) Next(dest []driver.Value) error {
-	if r.currentRowIdx >= r.numOfRows {
+	r.mu.Lock()
+	if r.lifecycle.closed {
+		r.mu.Unlock()
 		return io.EOF
 	}
-	rawRow := r.rowData[r.currentRowIdx]
+	if r.lifecycle.ctx != nil {
+		if err := r.lifecycle.ctx.Err(); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	rowIndex := r.currentRowIdx
+	if rowIndex >= r.numOfRows {
+		r.mu.Unlock()
+		return io.EOF
+	}
+	rawRow := r.rowData[rowIndex]
+	r.mu.Unlock()
+	var decodedLobs []*streamedLob
 	for i := range rawRow {
-		val, err := r.decodeColumnValue(i)
+		val, err := r.decodeColumnPayload(rawRow, i)
 		if err != nil {
+			invalidateStreamedLobs(decodedLobs)
 			return r.shelf.LocalizeError(err)
 		}
 		dest[i] = val
+		if lob, ok := val.(*streamedLob); ok {
+			decodedLobs = append(decodedLobs, lob)
+		}
+	}
+	r.mu.Lock()
+	if r.lifecycle.closed {
+		r.mu.Unlock()
+		invalidateStreamedLobs(decodedLobs)
+		return io.EOF
 	}
 	r.currentRowIdx++
+	r.mu.Unlock()
 	return nil
 }
 
-// decodeColumnValue returns the decoded driver.Value for the current row's column i.
+// decodeColumnPayload returns the decoded driver.Value for columnIndex in a
+// previously snapshotted row. The row snapshot keeps decoding independent of
+// Rows.Close clearing the parent result buffers.
+//
+// Parameters:
+//   - rawRow: snapshotted row payloads, including any LOB metadata.
+//   - columnIndex: index of the column to decode.
+//
+// Returns:
+//   - driver.Value: decoded value or locator-backed LOB source.
+//   - error: malformed payload or codec error.
 //
 // Behaviour:
-//   - Handlers normalize Oracle NULL payloads to nil.
+//   - Oracle NULL payloads are normalized to nil.
 //   - Constructed values pass through without byte decoding.
-//   - When a decoder is available for the column's TTC datatype, it is invoked; otherwise
-//     the raw protocol bytes are surfaced unchanged.
-//
-// Errors:
-//   - Any error propagated from the registered TTC codec for the column's datatype.
-func (r *ttcRows) decodeColumnValue(i int) (driver.Value, error) {
-	// Fast-path locals to minimize repeated bounds checks and lookups
-	colCtx := r.columnContexts[i]
+//   - A registered TTC decoder handles its datatype; unknown types remain raw bytes.
+func (r *ttcRows) decodeColumnPayload(rawRow []columnPayload, columnIndex int) (driver.Value, error) {
+	// Copy the column context because row-specific values must not mutate the
+	// shared descriptor stored on ttcRows.
+	colCtx := r.columnContexts[columnIndex]
 	dtype := colCtx.DataType
 	scale := colCtx.Scale
-	payload := r.rowData[r.currentRowIdx][i]
+	payload := rawRow[columnIndex]
 	colCtx.LobContext = payload.lob
 	colCtx.serverTimeZoneOffset = r.shelf.getServerTimeZoneOffset()
+	// Non-NULL BLOB, CLOB, and NCLOB columns are represented by a locator source.
+	// The database/sql scan destination selects streaming or materialization.
+	// JSON uses a LOB transport internally but retains its historical string.
+	if dtype == DtyBlob || dtype == DtyClob {
+		metadata := colCtx.LobContext
+		if metadata == nil {
+			return nil, common.NewOracleError(
+				oracleErrors.InvalidLobSource,
+				nil,
+				"row metadata",
+			)
+		}
+		// The current RXD protocol represents SQL NULL with a zero locator length and
+		// does not send the remaining locator fields. Do this check before
+		// requiring a locator, but never treat a non-empty prefix as NULL. Keep
+		// LOB NULLs as nil regardless of strictNullHandling so typed scanners can
+		// distinguish SQL NULL from a non-NULL empty LOB locator.
+		if payload.data == nil && metadata.LocatorByteLength == 0 && len(metadata.LobLocator) == 0 {
+			return nil, nil
+		}
+		if len(metadata.LobLocator) == 0 {
+			return nil, common.NewOracleError(
+				oracleErrors.InvalidLobSource,
+				nil,
+				"LOB locator",
+			)
+		}
+		var data driverCommon.B1Array
+		if payload.data != nil {
+			var ok bool
+			data, ok = payload.data.(driverCommon.B1Array)
+			if !ok {
+				return nil, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB prefix")
+			}
+		}
+		value, err := newStreamedLob(r, dtype, data, *metadata)
+		if err != nil {
+			return nil, err
+		}
+		return value, nil
+	}
 	// Handle Oracle SQL NULL (typically raw length zero is NULL).
 	if payload.data == nil {
-		return r.handleNull(i, dtype, scale), nil
+		return r.handleNull(columnIndex, dtype, scale), nil
 	}
-
 	data, raw := payload.data.(driverCommon.B1Array)
 	if !raw {
 		return payload.data, nil
@@ -213,10 +346,100 @@ func (r *ttcRows) decodeColumnValue(i int) (driver.Value, error) {
 	return val, nil
 }
 
+// invalidateStreamedLobs releases values decoded for a row that cannot be
+// returned because a later column failed or Rows closed during decoding.
+//
+// Parameters:
+//   - values: LOB values created while decoding the row.
+func invalidateStreamedLobs(values []*streamedLob) {
+	for _, value := range values {
+		value.invalidate()
+	}
+}
+
+// beginLobOperation validates Rows and snapshots its context before a locator
+// RPC. It rechecks lifecycle state so Close can invalidate a value before a
+// later RPC begins. Concurrent LOB and ordinary TTC operations on the same
+// physical connection are unsupported until session-wide synchronization is
+// added.
+//
+// Returns:
+//   - context.Context: query context for the locator RPC.
+//   - error: lifecycle, session, or context error that prevents the RPC.
+func (r *ttcRows) beginLobOperation() (context.Context, error) {
+	r.mu.Lock()
+	if r.lifecycle.closed {
+		r.mu.Unlock()
+		return nil, common.NewOracleError(oracleErrors.LobValueInvalidated, nil, "Rows owner")
+	}
+	ctx := r.lifecycle.ctx
+	shelf := r.shelf
+	r.mu.Unlock()
+	if shelf.lobState.isInvalid() {
+		return nil, common.NewOracleError(oracleErrors.LobValueInvalidated, nil, "LOB session")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	closed := r.lifecycle.closed
+	r.mu.Unlock()
+	if shelf.lobState.isInvalid() {
+		return nil, common.NewOracleError(oracleErrors.LobValueInvalidated, nil, "LOB session")
+	}
+	if closed || ctx.Err() != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, common.NewOracleError(oracleErrors.LobValueInvalidated, nil, "Rows owner")
+	}
+	return ctx, nil
+}
+
+// isClosed reports whether the owning Rows has invalidated its child locators.
+// It is safe to call while streamedLob.mu is held because Rows never holds r.mu
+// while acquiring a streamedLob mutex.
+//
+// Returns:
+//   - bool: true when Rows is closed.
+func (r *ttcRows) isClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lifecycle.closed
+}
+
+// contextErr returns the query/Rows lifecycle error without exposing the
+// mutable context field to locator-backed values.
+//
+// Returns:
+//   - error: query-context error, or nil while the context remains active.
+func (r *ttcRows) contextErr() error {
+	r.mu.Lock()
+	ctx := r.lifecycle.ctx
+	r.mu.Unlock()
+	return ctx.Err()
+}
+
+// invalidateAfterUnsafeLobRPC closes Rows after a locator operation fails. It
+// does not call into streamedLob while the RPC caller may hold that value's
+// mutex. Posting the stale-stream event prevents database/sql from reusing the
+// physical connection after an uncertain locator exchange.
+func (r *ttcRows) invalidateAfterUnsafeLobRPC() {
+	stmt, _, first := r.transitionToClosed(nil)
+	if first {
+		if stmt != nil {
+			stmt.detachRows(r)
+		}
+	}
+	if r.shelf != nil {
+		r.shelf.getEventService().post(streamerStaleEvent)
+	}
+}
+
 // handleNull determines the driver.Value to surface for a NULL result-set column.
 //
 // Preconditions:
-//   - Column nullability is checked by decodeColumnValue before this helper is invoked.
+//   - Column nullability is checked by decodeColumnPayload before this helper is invoked.
 //
 // Inputs:
 //   - i: zero-based column index within the current row buffer.
@@ -341,28 +564,122 @@ func defaultNumericValue(scale int8) (driver.Value, bool) {
 	}
 }
 
-// Close implements driver.Rows.Close. No network/protocol resources are owned
-// by this object currently, so this is a no-op.
+// Close implements driver.Rows.Close. It invalidates child LOB locators and
+// releases buffered rows. It also closes a Statement when Rows owns it.
 func (r *ttcRows) Close() error {
 	common.Odl.Fine("closing rows")
+	stmt, owned, first := r.transitionToClosed(nil)
+	if !first {
+		return nil
+	}
+	if stmt == nil {
+		return nil
+	}
+	stmt.detachRows(r)
+	if owned {
+		return stmt.Close()
+	}
+	return nil
+}
+
+// transitionToClosed closes Rows, cancels locator work, and detaches Statement
+// ownership without acquiring a streamedLob mutex. The closed state invalidates
+// escaped values without making Rows.Close wait for a network read. If
+// expectedStatement is non-nil, it must own Rows for the transition.
+//
+// Parameters:
+//   - expectedStatement: optional statement that must own Rows for the transition.
+//
+// Returns:
+//   - *Statement: statement detached from Rows, or nil when none was attached.
+//   - bool: whether Rows owned the statement.
+//   - bool: whether this call performed the close transition.
+func (r *ttcRows) transitionToClosed(expectedStatement *Statement) (*Statement, bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lifecycle.closed || (expectedStatement != nil && r.lifecycle.statement != expectedStatement) {
+		return nil, false, false
+	}
+	r.lifecycle.closed = true
+	if r.lifecycle.cancel != nil {
+		r.lifecycle.cancel()
+	}
+	stmt := r.lifecycle.statement
+	owned := r.lifecycle.ownsStatement
+	r.lifecycle.statement = nil
+	r.lifecycle.ownsStatement = false
+	// Escaped Lob values retain their small Rows owner to observe invalidation.
+	// Drop buffered result payloads here so one closed Lob cannot retain the
+	// complete query result in memory.
+	r.rowData = nil
+	return stmt, owned, true
+}
+
+// attachStatement records the prepared Statement which produced these Rows.
+// The reference is non-owning until the direct Connection query path promotes
+// it with takeStatementOwnership.
+//
+// Parameters:
+//   - stmt: statement that produced Rows.
+func (r *ttcRows) attachStatement(stmt *Statement) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.lifecycle.closed {
+		r.lifecycle.statement = stmt
+	}
+}
+
+// takeStatementOwnership transfers an internally-created direct-query
+// Statement to Rows so database/sql keeps both cursor and connection alive
+// until Rows.Close. It returns false if Rows was already closed or was not
+// attached to stmt, allowing the connection path to close stmt rather than
+// leak it.
+//
+// Parameters:
+//   - stmt: direct-query statement to transfer to Rows.
+//
+// Returns:
+//   - bool: true when Rows accepted statement ownership.
+func (r *ttcRows) takeStatementOwnership(stmt *Statement) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.lifecycle.closed && r.lifecycle.statement == stmt {
+		r.lifecycle.ownsStatement = true
+		return true
+	}
+	return false
+}
+
+// closeFromStatement marks Rows closed without calling back into Statement.
+// Statement.Close uses this path to avoid a recursive close cycle.
+//
+// Parameters:
+//   - stmt: statement whose close initiated the transition.
+//
+// Returns:
+//   - error: always nil.
+func (r *ttcRows) closeFromStatement(stmt *Statement) error {
+	r.transitionToClosed(stmt)
 	return nil
 }
 
 // newTTCRows constructs a ttcRows instance from decoded column metadata.
-// It precomputes and caches fields backing the RowsColumnType* interfaces
-// for fast access during scanning and introspection.
 func newTTCRows(columnContexts []columnContext) *ttcRows {
 	n := len(columnContexts)
-	if n == 0 {
-		return &ttcRows{strictNullHandlingValue: true}
+	rows := &ttcRows{
+		strictNullHandlingValue: true,
+		lifecycle: rowsLifecycle{
+			ctx: context.Background(),
+		},
 	}
-	rows := &ttcRows{strictNullHandlingValue: true}
+	if n == 0 {
+		return rows
+	}
 
 	rows.columnContexts = make([]columnContext, n)
 	for i := 0; i < n; i++ {
 		rows.columnContexts[i] = columnContexts[i]
 	}
-
 	return rows
 }
 
@@ -467,11 +784,15 @@ func (r *ttcRows) ColumnTypePrecisionScale(index int) (int64, int64, bool) {
 }
 
 // ColumnTypeScanType implements RowsColumnTypeScanType. It returns the Go type
-// into which database values will be scanned. Currently, []byte is used for all
-// columns, matching the raw protocol representation returned by Next.
+// into which database values will be scanned. LOB columns use any for their
+// locator-backed values.
 func (r *ttcRows) ColumnTypeScanType(index int) reflect.Type {
+	dtype := r.columnContexts[index].DataType
+	if dtype == DtyBlob || dtype == DtyClob {
+		return reflect.TypeFor[any]()
+	}
 	if r.columnContexts[index].ScanType == nil {
-		decoder, err := r.shelf.GetCodecFactory().getDecoder(r.columnContexts[index].DataType)
+		decoder, err := r.shelf.GetCodecFactory().getDecoder(dtype)
 		if err != nil {
 			common.Odl.Warn("Do not have decode mapping", "type", r.columnContexts[index].DataType)
 			return reflect.TypeOf([]byte(nil))
@@ -496,6 +817,10 @@ type ttcRowsRefCursorImplicitFetch struct {
 	*ttcRowsRefCursor
 	implicitRows     []*ttcRowsRefCursor
 	currentResultSet int
+	// statement is the Statement that produced these implicit result sets.
+	statement *Statement
+	// ownsStatement is true when closing these Rows must also close statement.
+	ownsStatement bool
 }
 
 // newRefCursorResultRows adds REF CURSOR ownership and cleanup to base rows.
@@ -519,6 +844,7 @@ func (r *ttcRowsRefCursor) attachShelf(shelf *ttiShelf[driverCommon.MessageType]
 
 // attachSessionContext forwards the session context to the cursor's fetch executor.
 func (r *ttcRowsRefCursor) attachSessionContext(sessCtx *driverCommon.SessionContext) {
+	r.ttcRows.setSessionContext(sessCtx)
 	r.executor.SetSessionContext(sessCtx)
 }
 
@@ -544,6 +870,9 @@ func (r *ttcRowsRefCursor) Close() error {
 				}
 			}
 		}
+	}
+	if err := r.ttcRows.Close(); err != nil && r.closeErr == nil {
+		r.closeErr = err
 	}
 	if r.cursorID != 0 && r.shelf != nil {
 		if err := r.closeServerCursor(); err != nil && r.closeErr == nil {
@@ -643,6 +972,61 @@ func (r *ttcRowsRefCursorImplicitFetch) NextResultSet() error {
 	return nil
 }
 
+// setContext binds each child result set to the public query context rather
+// than the short-lived execution context used while the PL/SQL call runs.
+//
+// Parameters:
+//   - parent: caller's query context.
+func (r *ttcRowsRefCursorImplicitFetch) setContext(parent context.Context) {
+	for _, rows := range r.implicitRows {
+		if rows != nil && rows.ttcRows != nil {
+			rows.ttcRows.setContext(parent)
+		}
+	}
+}
+
+// attachStatement records the Statement that produced these implicit results.
+//
+// Parameters:
+//   - stmt: statement that produced the implicit result sets.
+func (r *ttcRowsRefCursorImplicitFetch) attachStatement(stmt *Statement) {
+	if !r.closed {
+		r.statement = stmt
+	}
+}
+
+// takeStatementOwnership transfers a direct PL/SQL query's Statement to Rows.
+//
+// Parameters:
+//   - stmt: direct-query statement to transfer to Rows.
+//
+// Returns:
+//   - bool: true when this wrapper accepted statement ownership.
+func (r *ttcRowsRefCursorImplicitFetch) takeStatementOwnership(stmt *Statement) bool {
+	if r.closed || r.statement != stmt {
+		return false
+	}
+	r.ownsStatement = true
+	return true
+}
+
+// closeFromStatement closes these results without recursively closing their
+// Statement, which is already performing its own cleanup.
+//
+// Parameters:
+//   - stmt: statement whose close initiated the transition.
+//
+// Returns:
+//   - error: first child-row close error, or nil when all children close.
+func (r *ttcRowsRefCursorImplicitFetch) closeFromStatement(stmt *Statement) error {
+	if r.statement != stmt {
+		return nil
+	}
+	r.statement = nil
+	r.ownsStatement = false
+	return r.Close()
+}
+
 // Close closes every implicit result set, retaining the first close error for
 // later calls. Closing this wrapper more than once is idempotent.
 func (r *ttcRowsRefCursorImplicitFetch) Close() error {
@@ -650,11 +1034,22 @@ func (r *ttcRowsRefCursorImplicitFetch) Close() error {
 		return r.closeErr
 	}
 	r.closed = true
+	stmt, ownsStatement := r.statement, r.ownsStatement
+	r.statement = nil
+	r.ownsStatement = false
 	for _, rows := range r.implicitRows {
 		if rows != nil {
 			if err := rows.Close(); err != nil && r.closeErr == nil {
 				r.closeErr = err
 			}
+		}
+	}
+	if stmt != nil {
+		stmt.detachRows(r)
+	}
+	if ownsStatement && stmt != nil {
+		if err := stmt.Close(); err != nil && r.closeErr == nil {
+			r.closeErr = err
 		}
 	}
 	return r.closeErr

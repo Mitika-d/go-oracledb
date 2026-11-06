@@ -237,6 +237,12 @@ const (
 	// LobValueInvalidated indicates the Rows, statement, transaction, or
 	// connection that owns a locator-backed LOB is no longer usable.
 	LobValueInvalidated ErrorCode = "OGD-00174"
+	// LobValueClosed indicates an operation was attempted after a streamed LOB value was closed.
+	LobValueClosed ErrorCode = "OGD-00175"
+	// InvalidLobSource indicates a value is not a valid driver-provided LOB source.
+	InvalidLobSource ErrorCode = "OGD-00176"
+	// InvalidLobInput indicates streamed LOB bind input is malformed.
+	InvalidLobInput ErrorCode = "OGD-00177"
 
 	ProtocolViolationLimitExceeded ErrorCode = "OGD-00200"
 
