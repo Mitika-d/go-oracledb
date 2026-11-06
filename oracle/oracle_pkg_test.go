@@ -203,6 +203,12 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestDriver_Table_Select_NullJSON", Categories: "functional", Exclusive: false, Fn: TestDriver_Table_Select_NullJSON},
 	{Name: "TestDriver_Table_Select_CLOB", Categories: "functional", Exclusive: false, Fn: TestDriver_Table_Select_CLOB},
 	{Name: "TestDriver_Table_Select_BLOB", Categories: "functional", Exclusive: false, Fn: TestDriver_Table_Select_BLOB},
+	{Name: "TestDriver_Table_Select_TypedLOB", Categories: "functional", Exclusive: false, Fn: TestDriver_Table_Select_TypedLOB},
+	{Name: "TestDriver_LOBBindLargeAndEmptyValues", Categories: "functional", Exclusive: false, Fn: TestDriver_LOBBindLargeAndEmptyValues},
+	{Name: "TestDriver_TypedLOBArgumentValidation", Categories: "functional", Exclusive: false, Fn: TestDriver_TypedLOBArgumentValidation},
+	{Name: "TestDriver_TypedLOBPersistentWriteTo", Categories: "functional", Exclusive: false, Fn: TestDriver_TypedLOBPersistentWriteTo},
+	{Name: "TestDriver_TypedLOBQueryRowScans", Categories: "functional", Exclusive: false, Fn: TestDriver_TypedLOBQueryRowScans},
+	{Name: "TestDriver_TypedLOBStreamingPastPrefetch", Categories: "functional", Exclusive: false, Fn: TestDriver_TypedLOBStreamingPastPrefetch},
 	{Name: "TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows", Categories: "functional", Exclusive: false, Fn: TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows},
 	{Name: "TestDriver_Table_Insert_Select_JSON_MultiRows", Categories: "functional", Exclusive: false, Fn: TestDriver_Table_Insert_Select_JSON_MultiRows},
 

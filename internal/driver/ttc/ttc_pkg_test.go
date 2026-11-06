@@ -704,6 +704,7 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestTTIrxd_MarshalTo_LobLocatorBind", Categories: "unitary", Exclusive: false, Fn: TestTTIrxd_MarshalTo_LobLocatorBind},
 	{Name: "TestTypeDecoder_DecodeClobUsesLOBCharsetMetadata", Categories: "unitary", Exclusive: false, Fn: TestTypeDecoder_DecodeClobUsesLOBCharsetMetadata},
 	{Name: "TestStreamedLob_BoundedClobReadAmountUsesCharacterChunk", Categories: "unitary", Exclusive: false, Fn: TestStreamedLob_BoundedClobReadAmountUsesCharacterChunk},
+	{Name: "TestStreamedLob_AdoptPersistentLocatorTransfersRowsOwnership", Categories: "unitary", Exclusive: false, Fn: TestStreamedLob_AdoptPersistentLocatorTransfersRowsOwnership},
 	{Name: "TestStreamedLob_ReadStreamsPrefixAndLocatorChunks", Categories: "unitary", Exclusive: false, Fn: TestStreamedLob_ReadStreamsPrefixAndLocatorChunks},
 	{Name: "TestStreamedLob_InlinePrefixCannotExceedDeclaredLength", Categories: "unitary", Exclusive: false, Fn: TestStreamedLob_InlinePrefixCannotExceedDeclaredLength},
 	{Name: "TestStreamedLob_ReadClobUsesDeclaredLengthAndStopsAtEOF", Categories: "unitary", Exclusive: false, Fn: TestStreamedLob_ReadClobUsesDeclaredLengthAndStopsAtEOF},

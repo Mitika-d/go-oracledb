@@ -357,6 +357,25 @@ func invalidateStreamedLobs(values []*streamedLob) {
 	}
 }
 
+// detachLobForAdoption verifies that a streamed value still belongs to a live
+// Rows result before its persistent locator is transferred to a typed handle.
+// The caller holds value.mu. Rows lifecycle methods do not acquire it, so this
+// value-to-Rows lock order cannot deadlock with Rows.Close.
+func (r *ttcRows) detachLobForAdoption(value *streamedLob) bool {
+	if value == nil || value.owner != r {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lifecycle.closed || r.lifecycle.ctx == nil || r.lifecycle.ctx.Err() != nil {
+		return false
+	}
+	if r.shelf == nil || r.shelf.lobState == nil || r.shelf.lobState.isInvalid() {
+		return false
+	}
+	return true
+}
+
 // beginLobOperation validates Rows and snapshots its context before a locator
 // RPC. It rechecks lifecycle state so Close can invalidate a value before a
 // later RPC begins. Concurrent LOB and ordinary TTC operations on the same

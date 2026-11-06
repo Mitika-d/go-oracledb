@@ -46,7 +46,174 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	lobpkg "github.com/oracle/go-oracledb/v26/oracle/datatype/lob"
 )
+
+// TestDriver_Table_Select_TypedLOB exercises public typed scanners, locator
+// ownership after Rows.Close, SQL NULL, kind validation, and temporary writes.
+func TestDriver_Table_Select_TypedLOB(t *testing.T) {
+	if TestingConfig == nil {
+		t.Skip("No configuration available")
+	}
+	dsn := TestingConfig.GetConnectionString()
+	separator := "?"
+	if strings.Contains(dsn, "?") {
+		separator = "&"
+	}
+	dsn += separator + "oracle.go.DriverProperties.DefaultLobPrefetchSize=8"
+	db, err := sql.Open(TestingConfig.Driver.Name, dsn)
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	if err := db.PingContext(ctx); err != nil {
+		t.Fatalf("PingContext() error = %v", err)
+	}
+
+	table := createObjectName("typed_lob")
+	if err := createTable(ctx, db, table, map[string]string{
+		"id":   "NUMBER PRIMARY KEY",
+		"bin":  "BLOB",
+		"txt":  "CLOB",
+		"ntxt": "NCLOB",
+	}); err != nil {
+		t.Fatalf("createTable() error = %v", err)
+	}
+	t.Cleanup(func() { _ = dropTable(ctx, db, table) })
+
+	blobData := bytes.Repeat([]byte{0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff}, 20_000)
+	clobText := strings.Repeat("café😀", 12_000)
+	nclobText := strings.Repeat("नमस्ते🌏", 8_000)
+	insert := fmt.Sprintf("INSERT INTO %s (id, bin, txt, ntxt) VALUES (:1, :2, :3, :4)", table)
+	if _, err := db.ExecContext(ctx, insert, int64(1), BindBlob(blobData), BindClob(clobText), BindNClob(nclobText)); err != nil {
+		t.Fatalf("insert typed LOB row: %v", err)
+	}
+	insertNull := fmt.Sprintf("INSERT INTO %s (id, bin, txt, ntxt) VALUES (2, NULL, NULL, NULL)", table)
+	if _, err := db.ExecContext(ctx, insertNull); err != nil {
+		t.Fatalf("insert NULL LOB row: %v", err)
+	}
+
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("DB.Conn() error = %v", err)
+	}
+	defer conn.Close()
+	query := fmt.Sprintf("SELECT bin, txt, ntxt FROM %s WHERE id = 1", table)
+	rows, err := conn.QueryContext(ctx, query)
+	if err != nil {
+		t.Fatalf("QueryContext() error = %v", err)
+	}
+	if !rows.Next() {
+		rows.Close()
+		t.Fatalf("Next() = false, Err() = %v", rows.Err())
+	}
+	var blob lobpkg.Blob
+	var clob lobpkg.Clob
+	var nclob lobpkg.NClob
+	if err := rows.Scan(&blob, &clob, &nclob); err != nil {
+		rows.Close()
+		t.Fatalf("Scan() typed LOBs: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("Rows.Close() error = %v", err)
+	}
+
+	gotBlob, err := blob.ReadAllContext(ctx)
+	if err != nil || !bytes.Equal(gotBlob, blobData) {
+		t.Fatalf("Blob.ReadAllContext() len=%d error=%v, want %d bytes", len(gotBlob), err, len(blobData))
+	}
+	gotClob, err := clob.ReadAllContext(ctx)
+	if err != nil || gotClob != clobText {
+		t.Fatalf("Clob.ReadAllContext() len=%d error=%v, want %d bytes", len(gotClob), err, len(clobText))
+	}
+	gotNClob, err := nclob.ReadAllContext(ctx)
+	if err != nil || gotNClob != nclobText {
+		t.Fatalf("NClob.ReadAllContext() len=%d error=%v, want %d bytes", len(gotNClob), err, len(nclobText))
+	}
+	_ = blob.Close()
+	_ = clob.Close()
+	_ = nclob.Close()
+
+	rows, err = conn.QueryContext(ctx, fmt.Sprintf("SELECT bin, txt, ntxt FROM %s WHERE id = 2", table))
+	if err != nil {
+		t.Fatalf("QueryContext(NULL) error = %v", err)
+	}
+	if !rows.Next() {
+		rows.Close()
+		t.Fatalf("NULL Next() = false, Err() = %v", rows.Err())
+	}
+	if err := rows.Scan(&blob, &clob, &nclob); err != nil {
+		rows.Close()
+		t.Fatalf("Scan(NULL) error = %v", err)
+	}
+	if blob.Valid() || clob.Valid() || nclob.Valid() {
+		rows.Close()
+		t.Fatal("typed LOB values from SQL NULL should be invalid")
+	}
+	_ = rows.Close()
+
+	rows, err = conn.QueryContext(ctx, fmt.Sprintf("SELECT txt FROM %s WHERE id = 1", table))
+	if err != nil {
+		t.Fatalf("QueryContext(wrong kind) error = %v", err)
+	}
+	if !rows.Next() {
+		rows.Close()
+		t.Fatalf("wrong-kind Next() = false, Err() = %v", rows.Err())
+	}
+	var wrongKind lobpkg.Blob
+	if err := rows.Scan(&wrongKind); err == nil {
+		rows.Close()
+		t.Fatal("Blob.Scan() unexpectedly accepted a CLOB locator")
+	}
+	_ = rows.Close()
+
+	temporary, err := lobpkg.CreateTemporaryBlob(ctx, conn)
+	if err != nil {
+		t.Fatalf("CreateTemporaryBlob() error = %v", err)
+	}
+	defer func() { _ = temporary.FreeContext(ctx) }()
+	if _, err := temporary.WriteContext(ctx, []byte("temporary payload")); err != nil {
+		t.Fatalf("temporary WriteContext() error = %v", err)
+	}
+	if size, err := temporary.SizeContext(ctx); err != nil || size != int64(len("temporary payload")) {
+		t.Fatalf("temporary SizeContext() = (%d, %v), want (%d, nil)", size, err, len("temporary payload"))
+	}
+	if err := temporary.FreeContext(ctx); err != nil {
+		t.Fatalf("temporary FreeContext() error = %v", err)
+	}
+
+	temporaryClob, err := lobpkg.CreateTemporaryClob(ctx, conn)
+	if err != nil {
+		t.Fatalf("CreateTemporaryClob() error = %v", err)
+	}
+	defer func() { _ = temporaryClob.FreeContext(ctx) }()
+	if n, err := temporaryClob.WriteStringContext(ctx, "café😀"); err != nil || n != len("café😀") {
+		t.Fatalf("temporary CLOB WriteStringContext() = (%d, %v), want (%d, nil)", n, err, len("café😀"))
+	}
+	if size, err := temporaryClob.SizeContext(ctx); err != nil || size != 6 {
+		t.Fatalf("temporary CLOB SizeContext() = (%d, %v), want (6, nil)", size, err)
+	}
+	if err := temporaryClob.FreeContext(ctx); err != nil {
+		t.Fatalf("temporary CLOB FreeContext() error = %v", err)
+	}
+
+	temporaryNClob, err := lobpkg.CreateTemporaryNClob(ctx, conn)
+	if err != nil {
+		t.Fatalf("CreateTemporaryNClob() error = %v", err)
+	}
+	defer func() { _ = temporaryNClob.FreeContext(ctx) }()
+	if n, err := temporaryNClob.WriteStringContext(ctx, "雪🌏"); err != nil || n != len("雪🌏") {
+		t.Fatalf("temporary NCLOB WriteStringContext() = (%d, %v), want (%d, nil)", n, err, len("雪🌏"))
+	}
+	if size, err := temporaryNClob.SizeContext(ctx); err != nil || size != 3 {
+		t.Fatalf("temporary NCLOB SizeContext() = (%d, %v), want (3, nil)", size, err)
+	}
+	if err := temporaryNClob.FreeContext(ctx); err != nil {
+		t.Fatalf("temporary NCLOB FreeContext() error = %v", err)
+	}
+}
 
 // TestDriver_Table_Select_CLOB
 // What it does: Creates a table with a CLOB column, inserts a large string, then selects it back.
@@ -97,17 +264,17 @@ func TestDriver_Table_Select_CLOB(t *testing.T) {
 	}
 
 	// Select back (small)
-	var outSmall string
+	var outSmall lobpkg.Text
 	selSQL := fmt.Sprintf("SELECT txt FROM %s WHERE id = :id", table)
 	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(1))).Scan(&outSmall); err != nil {
 		t.Fatalf("select/scan small clob failed: %v", err)
 	}
-	if outSmall != clobSmall {
+	if string(outSmall) != clobSmall {
 		t.Fatalf("small clob mismatch:\n got: %q\nwant: %q", outSmall, clobSmall)
 	}
 
 	// Select back (large) - compare hash to keep failure messages manageable
-	var outLarge string
+	var outLarge lobpkg.Text
 	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(2))).Scan(&outLarge); err != nil {
 		t.Fatalf("select/scan large clob failed: %v", err)
 	}
@@ -130,7 +297,7 @@ func TestDriver_Table_Select_CLOB(t *testing.T) {
 
 // TestDriver_Table_Select_BLOB
 // What it does: Creates a table with a BLOB column, inserts raw bytes, then selects it back.
-// Expectation: Selecting the BLOB column and scanning into []byte returns the exact bytes inserted.
+// Expectation: Selecting the BLOB column and scanning into lob.Bytes returns the exact bytes inserted.
 // Notes:
 //   - Uses EMPTY_BLOB() + RETURNING to reliably store a BLOB value without implicit conversions.
 //   - Includes a NULL BLOB scan case.
@@ -198,7 +365,7 @@ func TestDriver_Table_Select_BLOB(t *testing.T) {
 
 	// Select back (small)
 	selSQL := fmt.Sprintf("SELECT bin FROM %s WHERE id = :id", table)
-	var outSmall []byte
+	var outSmall lobpkg.Bytes
 	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(1))).Scan(&outSmall); err != nil {
 		t.Fatalf("select/scan small blob failed: %v", err)
 	}
@@ -207,7 +374,7 @@ func TestDriver_Table_Select_BLOB(t *testing.T) {
 	}
 
 	// Select back (large) - compare hash
-	var outLarge []byte
+	var outLarge lobpkg.Bytes
 	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(2))).Scan(&outLarge); err != nil {
 		t.Fatalf("select/scan large blob failed: %v", err)
 	}
@@ -218,14 +385,10 @@ func TestDriver_Table_Select_BLOB(t *testing.T) {
 		)
 	}
 
-	// Select back (NULL) - validate NULL handling; scanning NULL into *[]byte yields nil with some drivers,
-	// but database/sql recommends sql.RawBytes or sql.Null* types. We use sql.RawBytes and check nil/len.
-	var outNull []byte
-	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(3))).Scan(&outNull); err != nil {
-		t.Fatalf("select/scan null blob failed: %v", err)
-	}
-	if outNull != nil && len(outNull) != 0 {
-		t.Fatalf("expected NULL blob to scan as nil/empty, got len=%d", len(outNull))
+	// Materializing SQL NULL into lob.Bytes is intentionally rejected.
+	var outNull lobpkg.Bytes
+	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(3))).Scan(&outNull); err == nil {
+		t.Fatal("select/scan NULL BLOB into lob.Bytes succeeded")
 	}
 }
 
@@ -311,8 +474,8 @@ func TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows(t *testing.T) {
 	for rows.Next() {
 		var (
 			id  int64
-			txt string
-			bin []byte
+			txt lobpkg.Text
+			bin lobpkg.Bytes
 		)
 
 		// Keep SELECT * while making scan resilient to table column order.
@@ -340,7 +503,7 @@ func TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows(t *testing.T) {
 			t.Fatalf("unexpected id returned from select: %d", id)
 		}
 
-		if txt != exp.clob {
+		if string(txt) != exp.clob {
 			t.Fatalf("clob mismatch for id=%d: got=%q want=%q", id, txt, exp.clob)
 		}
 
@@ -462,7 +625,7 @@ func runPreparedInsertNclob(t *testing.T, table string, rows []clobRowData) {
 			t.Fatalf("unexpected rows affected for id=%d: got %d want 1", rr.id, affected)
 		}
 
-		var gotNclob string
+		var gotNclob lobpkg.Text
 		err = db.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT nclob FROM %s WHERE id = %d", table, rr.id),
 		).Scan(&gotNclob)
@@ -470,7 +633,7 @@ func runPreparedInsertNclob(t *testing.T, table string, rows []clobRowData) {
 			t.Fatalf("select inserted row failed for id=%d: %v", rr.id, err)
 		}
 
-		if gotNclob != rr.c {
+		if string(gotNclob) != rr.c {
 			t.Logf("---- NCLOB MISMATCH DEBUG (id=%d) ----", rr.id)
 
 			// Length diagnostics
