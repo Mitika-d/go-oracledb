@@ -42,10 +42,16 @@ package ttc
 // follows the lifecycle of a locator: binary layout, flag semantics, high-level modes,
 // character-set hints, and finally temporary LOB handling constants.
 
-// DefaultCharacterLobChunkChars is the bounded text chunk capacity used by
-// CLOB/NCLOB reads and streamed character binds. Locator amounts for character
-// LOBs remain measured in UTF-16 code units.
-const DefaultCharacterLobChunkChars = 32 * 1024
+const (
+	// DefaultBlobLobChunkBytes is the bounded request size for BLOB reads and
+	// ordinary streamed BLOB bind writes.
+	DefaultBlobLobChunkBytes = 32 * 1024
+
+	// DefaultCharacterLobChunkChars is the bounded text chunk capacity used by
+	// CLOB/NCLOB reads and streamed character binds. Locator amounts for character
+	// LOBs remain measured in UTF-16 code units.
+	DefaultCharacterLobChunkChars = 32 * 1024
+)
 
 // -----------------------------------------------------------------------------
 // Locator layout and structural limits

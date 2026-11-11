@@ -220,16 +220,16 @@ const (
 	// Error when creating a transaction, ALTER SESSION to set isolation level
 	ConfigureTransactionError ErrorCode = "OGD-00084"
 
-	AuthenticatorError      ErrorCode = "OGD-00091"
-	NegotiatorError         ErrorCode = "OGD-00092"
-	MarshalEngineError      ErrorCode = "OGD-00093"
-	MarshalEngineFlushError ErrorCode = "OGD-00094"
-	StreamerReadError       ErrorCode = "OGD-00095"
-	StreamerWriteError      ErrorCode = "OGD-00096"
-	DatabaseMountStateError ErrorCode = "OGD-00097"
-	EmptyUsernameError      ErrorCode = "OGD-00098"
-	NoAuthenticatorError    ErrorCode = "OGD-00099"
-	ServerTimeZoneError     ErrorCode = "OGD-00110"
+	AuthenticatorError             ErrorCode = "OGD-00091"
+	NegotiatorError                ErrorCode = "OGD-00092"
+	MarshalEngineError             ErrorCode = "OGD-00093"
+	MarshalEngineFlushError        ErrorCode = "OGD-00094"
+	StreamerReadError              ErrorCode = "OGD-00095"
+	StreamerWriteError             ErrorCode = "OGD-00096"
+	DatabaseMountStateError        ErrorCode = "OGD-00097"
+	EmptyUsernameError             ErrorCode = "OGD-00098"
+	NoAuthenticatorError           ErrorCode = "OGD-00099"
+	ServerTimeZoneError            ErrorCode = "OGD-00110"
 	ProtocolViolationLimitExceeded ErrorCode = "OGD-00200"
 
 	// EmptyTokenError indicates that the configured token value is empty after
@@ -276,6 +276,8 @@ const (
 	// LobValueInvalidated indicates the Rows, statement, transaction, or
 	// connection that owns a locator-backed LOB is no longer usable.
 	LobValueInvalidated ErrorCode = "OGD-00309"
+	// InvalidLobInput indicates streamed LOB bind input is malformed.
+	InvalidLobInput ErrorCode = "OGD-00310"
 )
 
 // OracleRefuseErrorCodes maps ORA error numbers to the driver error
