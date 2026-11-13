@@ -167,6 +167,28 @@ func (c *connection) QueryContext(ctx context.Context, query string, args []driv
 		_ = stmt.Close()
 		return nil, c.shelf.LocalizeError(err)
 	}
+	// Direct-query Rows own their temporary Statement until Rows.Close so the
+	// cursor and locator-backed values share one lifetime.
+	switch rows := result.(type) {
+	case *ttcRows:
+		if !rows.takeStatementOwnership(stmt) {
+			_ = stmt.Close()
+			return nil, c.shelf.LocalizeError(common.NewOracleError(
+				oracleErrors.StatementExecutionFailed,
+				errors.New("query Rows closed before Statement ownership transfer"),
+				"query",
+			))
+		}
+	case *ttcRowsRefCursorImplicitFetch:
+		if !rows.takeStatementOwnership(stmt) {
+			_ = stmt.Close()
+			return nil, c.shelf.LocalizeError(common.NewOracleError(
+				oracleErrors.StatementExecutionFailed,
+				errors.New("implicit Rows closed before Statement ownership transfer"),
+				"query",
+			))
+		}
+	}
 	return result, nil
 }
 
@@ -275,8 +297,8 @@ func (c *connection) markInvalid() {
 	discardLobSessionState(c.shelf)
 }
 
-// CheckNamedValue allows sql.Out binds to pass through database/sql conversion.
-// For all other values, we delegate back to database/sql default conversion.
+// CheckNamedValue preserves streamed LOB markers and snapshots typed LOB
+// locators before database/sql default value conversion.
 func (c *connection) CheckNamedValue(nv *driver.NamedValue) error {
 	return c.shelf.LocalizeError(checkNamedValue(nv))
 }
@@ -287,8 +309,17 @@ func checkNamedValue(nv *driver.NamedValue) error {
 	// Preserve explicit LOB markers until statement bind normalization can turn
 	// them into streamed locator inputs. Falling through to database/sql's
 	// default converter would flatten named slices and strings to their base type.
-	switch nv.Value.(type) {
+	switch value := nv.Value.(type) {
 	case internallob.BindBlob, internallob.BindClob, internallob.BindNClob:
+		return nil
+	case internallob.LOBLocatorBindValue:
+		return nil
+	case internallob.LOBLocatorBindValueProvider:
+		bindValue, err := value.DriverLOBLocatorBindValue()
+		if err != nil {
+			return err
+		}
+		nv.Value = bindValue
 		return nil
 	}
 	// connectionWrapper.Fetch passes an already-decoded driver.Rows to the internal

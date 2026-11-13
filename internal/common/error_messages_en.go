@@ -483,6 +483,16 @@ func initMessagesEn() {
 	// Comment:  Arg[0]: invalidation detail.
 	message.SetString(language.English, string(oracleErrors.LobValueInvalidated), "LOB value is invalid because its owner is no longer usable: %s")
 	// Document: No
+	// Cause:    An operation was attempted after the streamed LOB value was closed.
+	// Action:   Scan a new value before reuse, or do not perform operations after Close.
+	// Comment:  Arg[0]: operation-specific detail.
+	message.SetString(language.English, string(oracleErrors.LobValueClosed), "LOB value is closed and cannot be used: %s")
+	// Document: No
+	// Cause:    A locator-backed LOB source is invalid or cannot be used by the requested operation.
+	// Action:   Use a valid locator-backed LOB value from the driver and verify its LOB kind and metadata.
+	// Comment:  Arg[0]: source validation detail.
+	message.SetString(language.English, string(oracleErrors.InvalidLobSource), "invalid locator-backed LOB source: %s")
+	// Document: No
 	// Cause:    A streamed LOB bind input has an invalid reader, kind, or declared size.
 	// Action:   Supply a non-nil reader, a supported LOB kind, and a valid size when specified.
 	// Comment:  Arg[0]: input validation detail.

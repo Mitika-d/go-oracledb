@@ -532,7 +532,6 @@ func runBvcIntegration(t *testing.T, dump []string, expRows [][][]byte, noCols c
 			}
 			// print state to terminal (debug/test visibility)
 			fmt.Printf("Row %v: BVC %v\n", rowCount, bvc.bvcColSent.String())
-
 		default:
 			// Unknown code - skip (defensive)
 			break
@@ -568,11 +567,9 @@ func TestTTIrxd_BvcPresentColumn_UnmarshalError(t *testing.T) {
 	}
 }
 
-// TestTTIrxd_BvcCarriedNullKeepsLobContextAligned verifies that a BVC-omitted
-// NULL column still contributes one entry to the row's parallel LOB-context
-// slice. Without that placeholder, row decoding later indexes past the end of
-// lobColContext before it can recognize the column as NULL.
-func TestTTIrxd_BvcCarriedNullKeepsLobContextAligned(t *testing.T) {
+// TestTTIrxd_BvcCarriedNullPreservesLobMetadata verifies that BVC preserves a
+// NULL LOB column and its aligned LOB metadata.
+func TestTTIrxd_BvcCarriedNullPreservesLobMetadata(t *testing.T) {
 	t.Parallel()
 	const numCols = 2
 
@@ -580,7 +577,11 @@ func TestTTIrxd_BvcCarriedNullKeepsLobContextAligned(t *testing.T) {
 	rxd.setCodecFactory(NewCodecFactoryForProtocol(MinTTCProtocolVersion))
 	rxd.setNumberOfColumns(numCols)
 	rxd.setRowCount(2)
-	rxd.setPrevRow(testColumnRow([]common.B1Array{{0x11}, nil}))
+	previousLobContext := &lobColumnContext{}
+	rxd.setPrevRow([]columnPayload{
+		{data: common.B1Array{0x11}},
+		{lob: previousLobContext},
+	})
 	rxd.setColumnContexts([]columnContext{
 		{DataType: DtyVCS},
 		{DataType: DtyClob},
@@ -597,17 +598,19 @@ func TestTTIrxd_BvcCarriedNullKeepsLobContextAligned(t *testing.T) {
 		t.Fatalf("UnmarshalFrom failed: %v", err)
 	}
 
+	if got := len(rxd.row); got != numCols {
+		t.Fatalf("row column count = %d, want %d", got, numCols)
+	}
 	if rxd.row[1].data != nil {
 		t.Fatalf("carried NULL column = %v, want nil", rxd.row[1])
 	}
-	if got := len(rxd.row); got != numCols {
-		t.Fatalf("LOB context count = %d, want %d to remain aligned with the row", got, numCols)
+	if got := rxd.row[1].lob; !reflect.DeepEqual(got, previousLobContext) {
+		t.Fatalf("carried NULL LOB context = %#v, want %#v", got, previousLobContext)
 	}
 }
 
 // TestTTIrxd_BvcCarriedClobPreservesLobContext verifies that BVC carry moves a
-// non-NULL CLOB's metadata together with its raw bytes. Losing the context leaves
-// DecodeClob with a nil LobContext and causes a nil-pointer panic during Rows.Next.
+// non-NULL CLOB's metadata together with its prefetched bytes.
 func TestTTIrxd_BvcCarriedClobPreservesLobContext(t *testing.T) {
 	t.Parallel()
 	const numCols = 2

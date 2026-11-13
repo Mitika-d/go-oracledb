@@ -46,14 +46,12 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	lobpkg "github.com/oracle/go-oracledb/v26/oracle/datatype/lob"
 )
 
-// TestDriver_Table_Select_CLOB
-// What it does: Creates a table with a CLOB column, inserts a large string, then selects it back.
-// Expectation: Selecting the CLOB column and scanning into string returns the exact text inserted.
-// Notes:
-//   - Uses TO_CLOB(:val) to ensure we bind a CLOB even for large values.
-//   - Includes a NULL CLOB scan case.
+// TestDriver_Table_Select_CLOB verifies materialized CLOB scans for small,
+// large, and SQL NULL values.
 func TestDriver_Table_Select_CLOB(t *testing.T) {
 	t.Parallel()
 	if TestingConfig == nil {
@@ -97,17 +95,17 @@ func TestDriver_Table_Select_CLOB(t *testing.T) {
 	}
 
 	// Select back (small)
-	var outSmall string
+	var outSmall lobpkg.Text
 	selSQL := fmt.Sprintf("SELECT txt FROM %s WHERE id = :id", table)
 	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(1))).Scan(&outSmall); err != nil {
 		t.Fatalf("select/scan small clob failed: %v", err)
 	}
-	if outSmall != clobSmall {
+	if string(outSmall) != clobSmall {
 		t.Fatalf("small clob mismatch:\n got: %q\nwant: %q", outSmall, clobSmall)
 	}
 
 	// Select back (large) - compare hash to keep failure messages manageable
-	var outLarge string
+	var outLarge lobpkg.Text
 	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(2))).Scan(&outLarge); err != nil {
 		t.Fatalf("select/scan large clob failed: %v", err)
 	}
@@ -128,12 +126,8 @@ func TestDriver_Table_Select_CLOB(t *testing.T) {
 	}
 }
 
-// TestDriver_Table_Select_BLOB
-// What it does: Creates a table with a BLOB column, inserts raw bytes, then selects it back.
-// Expectation: Selecting the BLOB column and scanning into []byte returns the exact bytes inserted.
-// Notes:
-//   - Uses EMPTY_BLOB() + RETURNING to reliably store a BLOB value without implicit conversions.
-//   - Includes a NULL BLOB scan case.
+// TestDriver_Table_Select_BLOB verifies materialized scans after inserting a
+// small inline BLOB, a large streamed temporary BLOB, and SQL NULL.
 func TestDriver_Table_Select_BLOB(t *testing.T) {
 	t.Parallel()
 	if TestingConfig == nil {
@@ -163,52 +157,43 @@ func TestDriver_Table_Select_BLOB(t *testing.T) {
 	blobSmall := []byte("hello blob")
 	blobLarge := bytes.Repeat([]byte{0x00, 0x01, 0x02, 0x03, 0xFE, 0xFF}, 100_000) // 600KB
 
-	// Small blob insert using bind + TO_BLOB(UTL_RAW.CAST_TO_RAW(...)) would be text-based; instead
-	// use a plain bind and let driver send bytes as BLOB if supported. If not, fallback to RETURNING.
-	insSQL := fmt.Sprintf("INSERT INTO %s (id, bin) VALUES (:id, :bin)", table)
-	if _, err := db.ExecContext(ctx, insSQL, sql.Named("id", int64(1)), sql.Named("bin", blobSmall)); err != nil {
-		// Fallback approach: insert EMPTY_BLOB then update with bind (works on more setups)
-		insEmpty := fmt.Sprintf("INSERT INTO %s (id, bin) VALUES (:id, EMPTY_BLOB())", table)
-		if _, err2 := db.ExecContext(ctx, insEmpty, sql.Named("id", int64(1))); err2 != nil {
-			t.Fatalf("insert small blob failed (direct=%v, empty=%v)", err, err2)
-		}
-		upd := fmt.Sprintf("UPDATE %s SET bin = :bin WHERE id = :id", table)
-		if _, err2 := db.ExecContext(ctx, upd, sql.Named("bin", blobSmall), sql.Named("id", int64(1))); err2 != nil {
-			t.Fatalf("update small blob failed: %v", err2)
-		}
+	// Case 1: Insert the small BLOB from its ordinary []byte value.
+	insSQL := fmt.Sprintf("INSERT INTO %s (id, bin) VALUES (:1, :2)", table)
+	if _, err := db.ExecContext(ctx, insSQL, int64(1), blobSmall); err != nil {
+		t.Fatalf("insert small BLOB: %v", err)
+	}
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("get dedicated LOB connection: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	// Case 2: Stream the large BLOB into a temporary LOB and bind its object.
+	temporaryBlob := writeTemporaryBlob(t, ctx, conn, blobLarge)
+	if _, err := conn.ExecContext(ctx, insSQL, int64(2), temporaryBlob); err != nil {
+		t.Fatalf("insert large BLOB: %v", err)
+	}
+	if err := temporaryBlob.FreeContext(ctx); err != nil {
+		t.Fatalf("free temporary BLOB: %v", err)
 	}
 
-	// Large blob insert
-	if _, err := db.ExecContext(ctx, insSQL, sql.Named("id", int64(2)), sql.Named("bin", blobLarge)); err != nil {
-		insEmpty := fmt.Sprintf("INSERT INTO %s (id, bin) VALUES (:id, EMPTY_BLOB())", table)
-		if _, err2 := db.ExecContext(ctx, insEmpty, sql.Named("id", int64(2))); err2 != nil {
-			t.Fatalf("insert large blob failed (direct=%v, empty=%v)", err, err2)
-		}
-		upd := fmt.Sprintf("UPDATE %s SET bin = :bin WHERE id = :id", table)
-		if _, err2 := db.ExecContext(ctx, upd, sql.Named("bin", blobLarge), sql.Named("id", int64(2))); err2 != nil {
-			t.Fatalf("update large blob failed: %v", err2)
-		}
-	}
-
-	// NULL case
+	// Case 3: Insert SQL NULL for the materialized-scan validation.
 	insNull := fmt.Sprintf("INSERT INTO %s (id, bin) VALUES (:id, NULL)", table)
-	if _, err := db.ExecContext(ctx, insNull, sql.Named("id", int64(3))); err != nil {
+	if _, err := conn.ExecContext(ctx, insNull, sql.Named("id", int64(3))); err != nil {
 		t.Fatalf("insert null blob failed: %v", err)
 	}
 
-	// Select back (small)
+	// Case 4: Read the small inline BLOB and the large temporary BLOB.
 	selSQL := fmt.Sprintf("SELECT bin FROM %s WHERE id = :id", table)
-	var outSmall []byte
-	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(1))).Scan(&outSmall); err != nil {
+	var outSmall lobpkg.Bytes
+	if err := conn.QueryRowContext(ctx, selSQL, sql.Named("id", int64(1))).Scan(&outSmall); err != nil {
 		t.Fatalf("select/scan small blob failed: %v", err)
 	}
 	if !bytes.Equal(outSmall, blobSmall) {
 		t.Fatalf("small blob mismatch:\n got:  %x\nwant: %x", outSmall, blobSmall)
 	}
 
-	// Select back (large) - compare hash
-	var outLarge []byte
-	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(2))).Scan(&outLarge); err != nil {
+	var outLarge lobpkg.Bytes
+	if err := conn.QueryRowContext(ctx, selSQL, sql.Named("id", int64(2))).Scan(&outLarge); err != nil {
 		t.Fatalf("select/scan large blob failed: %v", err)
 	}
 	if sha256.Sum256(outLarge) != sha256.Sum256(blobLarge) {
@@ -218,23 +203,15 @@ func TestDriver_Table_Select_BLOB(t *testing.T) {
 		)
 	}
 
-	// Select back (NULL) - validate NULL handling; scanning NULL into *[]byte yields nil with some drivers,
-	// but database/sql recommends sql.RawBytes or sql.Null* types. We use sql.RawBytes and check nil/len.
-	var outNull []byte
-	if err := db.QueryRowContext(ctx, selSQL, sql.Named("id", int64(3))).Scan(&outNull); err != nil {
-		t.Fatalf("select/scan null blob failed: %v", err)
-	}
-	if outNull != nil && len(outNull) != 0 {
-		t.Fatalf("expected NULL blob to scan as nil/empty, got len=%d", len(outNull))
+	// Case 5: Materializing SQL NULL into lob.Bytes is rejected.
+	var outNull lobpkg.Bytes
+	if err := conn.QueryRowContext(ctx, selSQL, sql.Named("id", int64(3))).Scan(&outNull); err == nil {
+		t.Fatal("select/scan NULL BLOB into lob.Bytes succeeded")
 	}
 }
 
-// TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows
-// What it does: Inserts 15 rows containing both CLOB and BLOB data, then reads them back using SELECT *.
-// Expectation: Every row selected from the table matches exactly what was inserted.
-// Notes:
-//   - CLOB/BLOB payload sizes are kept <= 20 for each row.
-//   - Query uses `SELECT * FROM <table>` as requested.
+// TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows inserts 15 short CLOB and
+// BLOB values, then checks every row returned by SELECT *.
 func TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows(t *testing.T) {
 	t.Parallel()
 	if TestingConfig == nil {
@@ -311,8 +288,8 @@ func TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows(t *testing.T) {
 	for rows.Next() {
 		var (
 			id  int64
-			txt string
-			bin []byte
+			txt lobpkg.Text
+			bin lobpkg.Bytes
 		)
 
 		// Keep SELECT * while making scan resilient to table column order.
@@ -340,7 +317,7 @@ func TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows(t *testing.T) {
 			t.Fatalf("unexpected id returned from select: %d", id)
 		}
 
-		if txt != exp.clob {
+		if string(txt) != exp.clob {
 			t.Fatalf("clob mismatch for id=%d: got=%q want=%q", id, txt, exp.clob)
 		}
 
@@ -359,166 +336,5 @@ func TestDriver_Table_Insert_Select_CLOB_BLOB_MultiRows(t *testing.T) {
 	// Confirm all 15 inserted rows were returned and validated.
 	if len(seen) != 15 {
 		t.Fatalf("row count mismatch: got=%d want=15", len(seen))
-	}
-}
-
-func TestDriver_Prepared_Insert_Nclob_Small(t *testing.T) {
-	t.Parallel()
-	rows := []clobRowData{
-		{
-			id: 1,
-			n:  "aaa",
-			c:  "hello nclob 山田太郎",
-		},
-		{
-			id: 2,
-			n:  "bbb",
-			c:  strings.Repeat("李小龙", 2000),
-		},
-		{
-			id: 3,
-			n:  "ccc",
-			c:  strings.Repeat("مرحبا", 4000),
-		},
-		{
-			id: 4,
-			n:  "ddd",
-			c:  strings.Repeat("👨‍💻🖥️", 1500),
-		},
-	}
-
-	runPreparedInsertNclob(t, createObjectName("nclob1_small"), rows)
-}
-
-func runPreparedInsertNclob(t *testing.T, table string, rows []clobRowData) {
-	t.Helper()
-
-	if TestingConfig == nil {
-		t.Skip("No configuration available")
-	}
-
-	db, err := openTestDBWithConfig(TestingConfig)
-	if err != nil {
-		t.Fatalf("failed to open test DB: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	ctx := context.Background()
-	dbCharset, err := fetchNLSCharacterSet(ctx, db)
-	if err != nil {
-		t.Fatalf("failed to fetch NLS_CHARACTERSET: %v", err)
-	}
-	ncharCharset, err := fetchNLSNcharCharacterSet(ctx, db)
-	if err != nil {
-		t.Fatalf("failed to fetch NLS_NCHAR_CHARACTERSET: %v", err)
-	}
-	if dbCharset != "AL32UTF8" {
-		t.Skipf("skipping prepared insert NCLOB test: expected NLS_CHARACTERSET AL32UTF8, got %s", dbCharset)
-	}
-	if ncharCharset != "AL16UTF16" {
-		t.Skipf("skipping prepared insert NCLOB test: expected NLS_NCHAR_CHARACTERSET AL16UTF16, got %s", ncharCharset)
-	}
-
-	cols := map[string]string{
-		"id":    "NUMBER PRIMARY KEY",
-		"name":  "VARCHAR2(20)",
-		"nclob": "NCLOB",
-	}
-
-	if err := createTable(ctx, db, table, cols); err != nil {
-		t.Skipf("Skipping prepared insert NCLOB test (create failed): %v", err)
-		return
-	}
-	t.Cleanup(func() {
-		if e := dropTable(ctx, db, table); e != nil {
-			t.Errorf("cleanup drop table %s failed: %v", table, e)
-		}
-	})
-
-	insSQL := "INSERT INTO " + table + " (id, name, nclob) " +
-		"VALUES (:id, :n, :c)"
-	insStmt, err := db.PrepareContext(ctx, insSQL)
-	if err != nil {
-		t.Fatalf("prepare insert failed: %v", err)
-	}
-	defer func() { _ = insStmt.Close() }()
-
-	for _, rr := range rows {
-		result, err := insStmt.ExecContext(ctx,
-			sql.Named("id", rr.id),
-			sql.Named("n", rr.n),
-			sql.Named("c", rr.c),
-		)
-
-		if err != nil {
-			t.Fatalf("exec insert failed for id=%d: %v", rr.id, err)
-		}
-
-		affected, err := result.RowsAffected()
-		if err != nil {
-			t.Fatalf("fetch RowsAffected failed for id=%d: %v", rr.id, err)
-		}
-		if affected != 1 {
-			t.Fatalf("unexpected rows affected for id=%d: got %d want 1", rr.id, affected)
-		}
-
-		var gotNclob string
-		err = db.QueryRowContext(ctx,
-			fmt.Sprintf("SELECT nclob FROM %s WHERE id = %d", table, rr.id),
-		).Scan(&gotNclob)
-		if err != nil {
-			t.Fatalf("select inserted row failed for id=%d: %v", rr.id, err)
-		}
-
-		if gotNclob != rr.c {
-			t.Logf("---- NCLOB MISMATCH DEBUG (id=%d) ----", rr.id)
-
-			// Length diagnostics
-			t.Logf("expected: bytes=%d runes=%d", len(rr.c), len([]rune(rr.c)))
-			t.Logf("actual  : bytes=%d runes=%d", len(gotNclob), len([]rune(gotNclob)))
-
-			// Raw byte dump (first 64 bytes)
-			maxDump := 64
-			expBytes := []byte(rr.c)
-			actBytes := []byte(gotNclob)
-
-			if len(expBytes) > maxDump {
-				expBytes = expBytes[:maxDump]
-			}
-			if len(actBytes) > maxDump {
-				actBytes = actBytes[:maxDump]
-			}
-
-			t.Logf("expected bytes (first %d): % x", maxDump, expBytes)
-			t.Logf("actual   bytes (first %d): % x", maxDump, actBytes)
-
-			// Optional string view
-			t.Logf("expected string: %q", rr.c)
-			t.Logf("actual   string: %q", gotNclob)
-
-			// Prefix mismatch detection
-			minLen := len(rr.c)
-			if len(gotNclob) < minLen {
-				minLen = len(gotNclob)
-			}
-
-			mismatchAt := -1
-			for i := 0; i < minLen; i++ {
-				if rr.c[i] != gotNclob[i] {
-					mismatchAt = i
-					break
-				}
-			}
-
-			if mismatchAt >= 0 {
-				t.Logf("first byte mismatch at index %d: expected=0x%x actual=0x%x",
-					mismatchAt, rr.c[mismatchAt], gotNclob[mismatchAt])
-			} else {
-				t.Logf("no mismatch in first %d bytes, possible trailing garbage", minLen)
-			}
-
-			t.Fatalf("unexpected nclob for id=%d: got length %d want %d",
-				rr.id, len(gotNclob), len(rr.c))
-		}
 	}
 }

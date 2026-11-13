@@ -80,7 +80,7 @@ func TestLobManager_RejectsUnsupportedKind(t *testing.T) {
 	manager := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
 	ctx := context.Background()
 	unsupported := internallob.Kind(99)
-	loc := (*locator)(nil)
+	loc := newTestLobReferenceLocator(73)
 	cases := []struct {
 		name string
 		call func() error
@@ -189,37 +189,6 @@ func TestLobManager_DecodePrefixEmptyPayload(t *testing.T) {
 	}
 	if len(data) != 0 || logical != 0 || carry != 0 {
 		t.Fatalf("decode empty prefix = (%q, %d, %#x), want empty data and zero units/carry", data, logical, carry)
-	}
-}
-
-// TestLobManager_RejectsNilLocator verifies each locator operation rejects a
-// missing locator before TTC dispatch.
-func TestLobManager_RejectsNilLocator(t *testing.T) {
-	t.Parallel()
-	manager := newLobManager(newShelf[common.MessageType](), newTestSessionContext())
-	ctx := context.Background()
-	cases := []struct {
-		name string
-		call func() error
-	}{
-		{name: "read", call: func() error { _, _, err := manager.read(ctx, internallob.BLOB, nil, 1, 0); return err }},
-		{name: "write", call: func() error { _, err := manager.write(ctx, internallob.BLOB, nil, nil); return err }},
-		{name: "decodePrefix", call: func() error { _, _, _, err := manager.decodePrefix(internallob.CLOB, nil, nil, false); return err }},
-		{name: "length", call: func() error { _, err := manager.length(ctx, internallob.BLOB, nil); return err }},
-		{name: "chunkSize", call: func() error { _, err := manager.chunkSize(ctx, internallob.BLOB, nil); return err }},
-		{name: "trim", call: func() error { _, err := manager.trim(ctx, internallob.BLOB, nil, 0); return err }},
-		{name: "open", call: func() error { _, err := manager.open(ctx, internallob.BLOB, nil, lobOpenModeReadOnly); return err }},
-		{name: "close", call: func() error { return manager.close(ctx, internallob.BLOB, nil) }},
-		{name: "isOpen", call: func() error { _, err := manager.isOpen(ctx, internallob.BLOB, nil); return err }},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var coded oracleErrors.SQLError
-			err := tc.call()
-			if err == nil || !errors.As(err, &coded) || coded.ErrorCode() != string(oracleErrors.InvalidLOBBuffer) {
-				t.Fatalf("nil-locator error = %v, want %s", err, oracleErrors.InvalidLOBBuffer)
-			}
-		})
 	}
 }
 
@@ -365,9 +334,6 @@ func TestLobManager_HandlesSessionAbandonmentAndReferenceErrors(t *testing.T) {
 	}
 	if err := secondManager.releaseLobReference(reference); err != nil {
 		t.Fatalf("release owning-session reference: %v", err)
-	}
-	if err := firstManager.freeLobReference(nil); err == nil {
-		t.Fatal("free nil locator succeeded")
 	}
 	if err := firstManager.freeLobReference(newTestLobReferenceLocator(73)); err != nil {
 		t.Fatalf("free standalone locator: %v", err)

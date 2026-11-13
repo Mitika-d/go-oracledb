@@ -100,6 +100,9 @@ func NewOracleLoggingConfig() *oracleconfig.OracleLoggingConfig {
 // config must not be nil.
 func (drv *Driver) ApplyDriverLoggingConfig(config *oracleconfig.OracleLoggingConfig) {
 	if config != nil {
+		// Mark the default initialization as handled so openConnector does not
+		// replace an application-supplied configuration on its first call.
+		_initLoggingOnce.Do(func() {})
 		common.InitLoggingWithConfig(config)
 	}
 }

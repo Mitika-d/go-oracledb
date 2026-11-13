@@ -197,6 +197,7 @@ func (e *statementExecutorSelect) newQueryRunState() *queryRunState {
 	}
 	rows := newTTCRows(e.resultMetadata.columns)
 	rows.SetShelf(e.shelf)
+	rows.setSessionContext(e.sessCtx)
 	return &queryRunState{rows: rows}
 }
 
@@ -1256,6 +1257,7 @@ func (e *statementExecutorSelect) handleDCB(state *queryRunState, msg driverComm
 	rows := newTTCRows(columns)
 	rows.SetShelf(e.shelf)
 	state.rows = rows
+	state.rows.setSessionContext(e.sessCtx)
 	return nil
 }
 

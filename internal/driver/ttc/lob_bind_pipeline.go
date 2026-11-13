@@ -160,7 +160,7 @@ func releaseLobBindsAfterExecution(preparedBinds *preparedLobBinds, executionErr
 }
 
 // --- Bind preparation ---
-// prepareStreamedLobBinds converts normalized and validated streamed LOB inputs
+// prepareStreamedLobBinds converts streamed inputs and caller-owned LOB locators
 // into locator binds before OALL/RXD marshalling begins.
 //
 // Parameters:
