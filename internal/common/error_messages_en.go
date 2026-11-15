@@ -488,10 +488,20 @@ func initMessagesEn() {
 	// Comment:  Arg[0]: invalidation detail.
 	message.SetString(language.English, string(oracleErrors.LobValueInvalidated), "LOB value is invalid because its owner is no longer usable: %s")
 	// Document: No
-	// Cause:    A typed LOB locator belongs to another session or has invalid metadata.
-	// Action:   Bind a valid LOB value through the connection that owns its locator.
-	// Comment:  Arg[0]: locator validation detail.
-	message.SetString(language.English, string(oracleErrors.InvalidLobSource), "LOB locator cannot be bound: %s")
+	// Cause:    An operation was attempted after the streamed LOB value was closed.
+	// Action:   Scan a new value before reuse, or do not perform operations after Close.
+	// Comment:  Arg[0]: operation-specific detail.
+	message.SetString(language.English, string(oracleErrors.LobValueClosed), "LOB value is closed and cannot be used: %s")
+	// Document: No
+	// Cause:    A locator-backed LOB source is invalid or cannot be used by the requested operation.
+	// Action:   Use a valid locator-backed LOB value from the driver and verify its LOB kind and metadata.
+	// Comment:  Arg[0]: source validation detail.
+	message.SetString(language.English, string(oracleErrors.InvalidLobSource), "invalid locator-backed LOB source: %s")
+	// Document: No
+	// Cause:    LOB input data is malformed, for example text contains invalid UTF-8.
+	// Action:   Supply valid data for the target LOB kind.
+	// Comment:  Arg[0]: input validation detail.
+	message.SetString(language.English, string(oracleErrors.InvalidLobInput), "LOB input is invalid: %s")
 
 	// Document: No
 	message.SetString(language.English, string(oracleErrors.CancelOperationError), "cancel operation failed")

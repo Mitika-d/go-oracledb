@@ -76,6 +76,14 @@ func newLobLease(
 	}, nil
 }
 
+// NewLOBSession implements the private handle-provider contract used by the
+// public typed LOB constructors. It captures the current pool-lease generation
+// so the returned capability expires when database/sql releases this
+// connection for reuse.
+func (c *connection) NewLOBSession() (internallob.LOBSession, error) {
+	return newLobLease(c.shelf, c.sessCtx)
+}
+
 // ValidateLOBLease checks the local generation captured by a query locator.
 // It does not enter the TTC stream, so buffered typed-LOB reads can reject an
 // expired connection lease without issuing a server request.

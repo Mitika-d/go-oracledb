@@ -119,8 +119,16 @@ func (connInstantiator *connectionInstantiator) GetConnection(ctx context.Contex
 	sessCtx.GetClientProperties().SetProperty(driverCommon.RemotePort, connInstantiator.ns.GetRemotePort())
 	sessCtx.GetClientProperties().SetProperty(driverCommon.ConnectDescriptor, connInstantiator.driverConfig.ConnectDescriptor)
 
-	// Add connection properties to shelf for downstream consumers
+	// Add connection properties to shelf for downstream consumers.
 	shelf.UpdateConnectionProperties(connInstantiator.driverConfig.DriverProperties)
+	// Negotiation creates the marshaller before connection properties are
+	// attached to the shelf. Apply the configured LOB prefetch size now so the
+	// marshaller's CLR safety limit follows the connection configuration.
+	if marshalEngine, ok := shelf.GetMarshaller().(*MarshalEngine); ok {
+		marshalEngine.setDefaultLobPrefetchSize(
+			int64(connInstantiator.driverConfig.DriverProperties.GetDefaultLobPrefetchSize()),
+		)
+	}
 	shelf.RegisterLocalizationService(connInstantiator.localizationService)
 	shelf.registerProviderRegistry(connInstantiator.providerRegistry)
 
