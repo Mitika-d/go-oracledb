@@ -549,6 +549,9 @@ func (e *statementProcessor) createMessages(query *qualifiedSQLStatement, args [
 		if err != nil {
 			return nil, err
 		}
+		if err := applyLOBLocatorBindOACMetadata(oacs, args); err != nil {
+			return nil, err
+		}
 	}
 	sendOACs := e.needToSendOACs(oacs)
 	functionType := config.functionType
@@ -852,8 +855,11 @@ func (e *statementProcessor) needToSendOACs(currentOacs []driverCommon.Marshalla
 		return true
 	}
 	for position := 0; position < len(currentOacs); position++ {
-		if e.previousOacs[position].(*tTIoac).dataType != currentOacs[position].(*tTIoac).dataType ||
-			e.previousOacs[position].(*tTIoac).maxLength < currentOacs[position].(*tTIoac).maxLength {
+		previous := e.previousOacs[position].(*tTIoac)
+		current := currentOacs[position].(*tTIoac)
+		if previous.dataType != current.dataType || previous.maxLength < current.maxLength ||
+			(current.dataType == driverCommon.UB1(DtyClob) &&
+				(previous.characterSetForm != current.characterSetForm || previous.characterSetID != current.characterSetID)) {
 			return true
 		}
 	}

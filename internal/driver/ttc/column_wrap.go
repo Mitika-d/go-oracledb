@@ -53,6 +53,12 @@ func newCLRBindEncoder(encode encoderFunc) *typeEncoder {
 	return newTypeEncoder(encode, wrapCLRColumn)
 }
 
+// newLOBBindEncoder adapts a LOB locator encoder to TTC's LOB bind
+// representation.
+func newLOBBindEncoder(encode encoderFunc) *typeEncoder {
+	return newTypeEncoder(encode, wrapLOBColumn)
+}
+
 // wrapCLRColumn writes payload as an ordinary TTC CLR bind. A nil payload is
 // written as TTC's null length indicator.
 func wrapCLRColumn(ctx context.Context, mar driverCommon.Marshaller, payload driverCommon.B1Array) error {
@@ -66,6 +72,39 @@ func wrapCLRColumn(ctx context.Context, mar driverCommon.Marshaller, payload dri
 
 	if err := mar.MarshalCLR(ctx, payload, 0, len(payload)); err != nil {
 		common.Odl.Error("wrapCLRColumn: failed to write CLR", "error", err, "stage", "clr")
+		return common.NewOracleError(oracleErrors.FailMarshal, err)
+	}
+	return nil
+}
+
+// wrapLOBColumn encodes a LOB locator bind as TTC column data.
+//
+// A nil payload is written as TTC's null indicator. A non-nil payload is
+// written as a UB4 byte length followed by the locator's CLR representation.
+// The caller must pass the encoded locator bytes, not the LOB contents.
+//
+// Parameters:
+//   - ctx: Context used by the marshaller for the write.
+//   - mar: Marshaller positioned at the beginning of the bind column.
+//   - payload: Encoded locator bytes, or nil for SQL NULL.
+//
+// Returns:
+//   - error: A FailMarshal error if writing the null indicator, length, or
+//     locator bytes fails.
+func wrapLOBColumn(ctx context.Context, mar driverCommon.Marshaller, payload driverCommon.B1Array) error {
+	if payload == nil {
+		if err := mar.MarshalUB1(ctx, driverCommon.UB1(0)); err != nil {
+			common.Odl.Error("wrapLOBColumn: failed to write null length indicator", "error", err, "stage", "null-indicator")
+			return common.NewOracleError(oracleErrors.FailMarshal, err)
+		}
+		return nil
+	}
+	if err := mar.MarshalUB4(ctx, driverCommon.UB4(len(payload))); err != nil {
+		common.Odl.Error("wrapLOBColumn: failed to write locator length", "error", err, "stage", "locator-length")
+		return common.NewOracleError(oracleErrors.FailMarshal, err)
+	}
+	if err := mar.MarshalCLR(ctx, payload, 0, len(payload)); err != nil {
+		common.Odl.Error("wrapLOBColumn: failed to write locator CLR", "error", err, "stage", "locator-clr")
 		return common.NewOracleError(oracleErrors.FailMarshal, err)
 	}
 	return nil
