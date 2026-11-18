@@ -18,6 +18,7 @@ Oracle Database Driver for Go is a native Go driver for Go's [database/sql](http
   - Native Oracle JSON support via `github.com/oracle/go-oracledb/v26/oracle/datatype/json`
   - BLOB support using prefetch and returning `[]byte`
   - CLOB support using prefetch and returning `string`
+  - Oracle `LONG` and `LONG RAW` support with materialized Go values
 
 ## Installation
 Run:
@@ -285,14 +286,20 @@ Errors are returned as `oracle.SQLError` which implements Go's `Error` interface
 | `BLOB`      | `[]byte`       |
 | `BFILE`     | `[]byte`       |
 
-### Unsupported Legacy Column Types
+### LONG and LONG RAW Types
 
-| Oracle type | Query result support | Recommended replacement |
-|-------------|----------------------|--------------------------|
-| `LONG`      | Not supported        | `CLOB`                   |
-| `LONG RAW`  | Not supported        | `BLOB`                   |
+| Oracle type | Query result | Bind value           | Recommended replacement |
+|-------------|--------------|----------------------|--------------------------|
+| `LONG`      | `string`     | `datatype.Long`      | `CLOB`                   |
+| `LONG RAW`  | `[]byte`     | `datatype.LongRaw`   | `BLOB`                   |
 
-Support for Oracle `LONG` and `LONG RAW` columns will be added in a later release.
+Use `datatype.Long` and `datatype.LongRaw` from `github.com/oracle/go-oracledb/v26/oracle/datatype` to bind these Oracle types. Ordinary Go `string` and `[]byte` binds use their regular Oracle types.
+
+`LONG` and `LONG RAW` are materialized as complete Go values; the driver does not stream them. The per-value limit is 2,147,483,647 bytes (2 GiB - 1) and applies to the value buffered by the driver. It does not guarantee that the process has that amount of memory available. The driver currently buffers fetched rows eagerly, so total memory use can grow with the number and size of returned rows.
+
+For PL/SQL binds, Oracle Database imposes a server-side maximum of 32,760 bytes for `LONG` and `LONG RAW` values. The driver rejects larger PL/SQL bind values before sending them.
+
+Multi-row `UPDATE` operations with `LONG` or `LONG RAW` bind values are not supported yet.
 
 ---
 

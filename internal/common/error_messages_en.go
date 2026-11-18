@@ -673,5 +673,10 @@ func initMessagesEn() {
 	message.SetString(language.English, string(oracleErrors.ExpiredToken), "access token has expired")
 
 	message.SetString(language.English, string(oracleErrors.ProviderNotFound), "no provider of the requested type was found")
+	// Document: No
+	// Cause:    A PL/SQL LONG or LONG RAW bind exceeds Oracle's size limit.
+	// Action:   Keep the bind value at or below the maximum size shown.
+	// Comment:  Arg[0]: maximum bind size in bytes.
+	message.SetString(language.English, string(oracleErrors.PLSQLLongBindLimitExceeded), "PL/SQL LONG and LONG RAW binds cannot exceed %d bytes")
 
 }

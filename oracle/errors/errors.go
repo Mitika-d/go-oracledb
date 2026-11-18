@@ -253,6 +253,9 @@ const (
 	// the wanted provider type
 	ProviderNotFound ErrorCode = "OGD-00206"
 
+	// PLSQLLongBindLimitExceeded indicates a LONG or LONG RAW bind exceeds Oracle's PL/SQL limit.
+	PLSQLLongBindLimitExceeded ErrorCode = "OGD-00207"
+
 	// JSONUninitializedValue indicates a public oracle/datatype/json API was called on an uninitialized receiver.
 	JSONUninitializedValue ErrorCode = "OGD-00300"
 	// JSONScanTypeUnsupportedError indicates Scan received a source type that oracle/datatype/json does not accept.
