@@ -223,3 +223,17 @@ type LOBSession interface {
 	//   - error: lease-invalidated error when the lease cannot be pinned.
 	AcquireLOBLease() (func(), error)
 }
+
+// LOBLocatorBindValue is a snapshot of a typed LOB locator for statement binding.
+// SessionKey prevents a locator from being bound through a different connection.
+type LOBLocatorBindValue struct {
+	SessionKey any
+	Kind       Kind
+	Locator    []byte
+}
+
+// LOBLocatorBindValueProvider lets a typed LOB expose its locator to the driver
+// without materializing the LOB contents.
+type LOBLocatorBindValueProvider interface {
+	DriverLOBLocatorBindValue() (LOBLocatorBindValue, error)
+}

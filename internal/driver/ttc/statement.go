@@ -130,6 +130,7 @@ type Statement struct {
 	queryStatementExecutor QueryWithContext
 	execStatementExecutor  ExecWithContext
 	_rows                  driver.Rows // reference on created Rows.
+	sessionContext         *driverCommon.SessionContext
 }
 
 /*
@@ -178,6 +179,7 @@ func newStatement(
 	}
 	stmt := &Statement{
 		shelf:                  shelf,
+		sessionContext:         sessionCtx,
 		qualifiedQuery:         classifiedQ,
 		queryStatementExecutor: queryExecutor,
 		execStatementExecutor:  execExecutor,
@@ -194,14 +196,21 @@ driver.StmtQueryContext.
 
 Implementation details:
   - Validates args against the parsed bind placeholders (count and names).
+  - Converts typed LOB values to locator binds before the statement executor
+    marshals SQL binds.
   - Creates a child context with a cancellation after-function that can attempt
     a server-side break/reset when ctx is canceled or times out.
   - Delegates execution to the queryStatementExecutor, which performs the TTC
     pipeline and returns a driver.Rows implementation.
+  - Discards the session after an ambiguous exchange involving a LOB locator.
 
 Callers must fully consume and Close the returned Rows.
 */
 func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	preparedArgs, hasLOBLocator, err := prepareLOBLocatorBinds(s.shelf, s.sessionContext, args)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
 	subContext, cancelSubContext, cleanup := s.createSubContextWithCancelAfterfunction(ctx)
 	defer cleanup()
 
@@ -214,8 +223,13 @@ func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) 
 		})
 		defer stopTransAfterFunction()
 	}
-	selectedRows, e := s.queryStatementExecutor.QueryContext(subContext, s.qualifiedQuery, args)
-	if e == nil {
+	selectedRows, executionErr := s.queryStatementExecutor.QueryContext(subContext, s.qualifiedQuery, preparedArgs)
+	executionErr = finishLOBLocatorBindExecution(s.shelf, hasLOBLocator, executionErr)
+	if executionErr != nil && selectedRows != nil {
+		_ = selectedRows.Close()
+		selectedRows = nil
+	}
+	if executionErr == nil {
 		s._rows = selectedRows
 	}
 
@@ -223,7 +237,10 @@ func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) 
 		return nil, err
 	}
 
-	return selectedRows, s.shelf.LocalizeError(e)
+	if executionErr != nil {
+		return nil, s.shelf.LocalizeError(executionErr)
+	}
+	return selectedRows, nil
 }
 
 // _closeCursor closes the statement cursorID if not 0
@@ -293,14 +310,21 @@ driver.StmtExecContext.
 
 Implementation details:
   - Validates args against the parsed bind placeholders (count and names).
+  - Converts typed LOB values to locator binds before the statement executor
+    marshals SQL binds.
   - Creates a child context with a cancellation after-function that can attempt
     a server-side break/reset when ctx is canceled or times out.
   - Delegates execution to the execStatementExecutor, which performs the TTC
     operations and returns a driver.Result.
+  - Discards the session after an ambiguous exchange involving a LOB locator.
 
 The returned Result may expose rows-affected metadata when the server provides it.
 */
 func (s *Statement) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	preparedArgs, hasLOBLocator, err := prepareLOBLocatorBinds(s.shelf, s.sessionContext, args)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
 	subContext, cancelSubContext, cleanup := s.createSubContextWithCancelAfterfunction(ctx)
 	defer cleanup()
 
@@ -313,7 +337,9 @@ func (s *Statement) ExecContext(ctx context.Context, args []driver.NamedValue) (
 		})
 		defer stopTransAfterFunction()
 	}
-	result, err := s.execStatementExecutor.ExecContext(subContext, s.qualifiedQuery, args)
+
+	result, err := s.execStatementExecutor.ExecContext(subContext, s.qualifiedQuery, preparedArgs)
+	err = finishLOBLocatorBindExecution(s.shelf, hasLOBLocator, err)
 	if err := s.shelf.checkCurrentState(ctx); err != nil {
 		return nil, err
 	}
