@@ -482,12 +482,11 @@ func TestPrepareBindsAndOAC_OAC_Errors(t *testing.T) {
 	}
 }
 
-// TestPrepareBindsAndOAC_LongBindOACLengthsByStatementKind verifies OAC sizing
-// for LONG, LONG RAW, and pure OUT LONG binds.
+// TestPrepareBindsAndOAC_LongBindOACLengthsByStatementKind verifies the SQL
+// and PL/SQL maximum OAC lengths for LONG, LONG RAW, and pure OUT LONG binds.
 // Test cases:
-//   - SQL retains prior OAC widths for shorter LONG and OUT values and grows
-//     LONG RAW to fit its larger payload.
-//   - PL/SQL uses the PL/SQL maximum OAC length for each LONG-family bind.
+//   - SQL uses the 2 GiB - 1 maximum for each LONG-family bind.
+//   - PL/SQL uses Oracle's 32,760-byte maximum for each LONG-family bind.
 func TestPrepareBindsAndOAC_LongBindOACLengthsByStatementKind(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -495,7 +494,11 @@ func TestPrepareBindsAndOAC_LongBindOACLengthsByStatementKind(t *testing.T) {
 		plsql       bool
 		wantLengths []common.UB4
 	}{
-		{name: "sql", wantLengths: []common.UB4{7, 12, 9}},
+		{name: "sql", wantLengths: []common.UB4{
+			converters.MaxLongValueLength,
+			converters.MaxLongValueLength,
+			converters.MaxLongValueLength,
+		}},
 		{name: "plsql", plsql: true, wantLengths: []common.UB4{
 			converters.MaxPLSQLLongValueLength,
 			converters.MaxPLSQLLongValueLength,
@@ -627,5 +630,71 @@ func TestPrepareBinds_EmptyLongPayloadsAndNullMetadata(t *testing.T) {
 	}
 	if !metadata[2].isNull || metadata[2].goType != nil || metadata[3].goType != reflect.TypeFor[string]() {
 		t.Fatalf("ordinary NULL/empty metadata changed: null=%+v empty=%+v", metadata[2], metadata[3])
+	}
+}
+
+// TestPrepareBindsAndOAC_LargeBindOrderPreservesOACPositions verifies that
+// size-based RXD deferral leaves OAC descriptors attached to their original
+// placeholder positions.
+//
+// Test cases:
+//   - With the standard threshold, 4,001-byte string and []byte binds are
+//     deferred around an ordinary marker while OACs stay in source order.
+//   - With 32K VARCHAR support, a 4,001-byte pair stays in order, while a
+//     32,768-byte pair is deferred and its OACs remain in source order.
+func TestPrepareBindsAndOAC_LargeBindOrderPreservesOACPositions(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		length    int
+		cap       common.Capability
+		wantDefer bool
+	}{
+		{name: "standard_limit", length: 4_001, wantDefer: true},
+		{name: "extended_limit_allows_4001", length: 4_001, cap: common.Capability{Value: 0x04, IsSet: true}},
+		{name: "extended_limit_defers_above_32767", length: 32_768, cap: common.Capability{Value: 0x04, IsSet: true}, wantDefer: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			shelf, _, _ := newExecTestShelf(1024)
+			registerTestCodecs(shelf, 20)
+			shelf.RegisterCapabilities(map[string]common.Capability{kpccapRtbTtc32k: tc.cap})
+			sp := &statementProcessor{shelf: shelf}
+			largeString := strings.Repeat("x", tc.length)
+			largeBytes := make([]byte, tc.length)
+			args := []sqldriver.Value{largeString, "marker", largeBytes}
+
+			messages, err := sp.createMessages(&qualifiedSQLStatement{}, args, executionMessageConfig{functionType: oAll8})
+			if err != nil {
+				t.Fatalf("createMessages returned error: %v", err)
+			}
+			if len(messages) != 2 {
+				t.Fatalf("message count = %d, want OALL8 and one RXD", len(messages))
+			}
+
+			oall := messages[0].(*tTIOall)
+			wantTypes := []DtyType{DtyChr, DtyChr, DtyBin}
+			wantLengths := []common.UB4{common.UB4(tc.length), 6, common.UB4(tc.length)}
+			if len(oall.bindOACs) != len(wantTypes) {
+				t.Fatalf("OAC count = %d, want %d", len(oall.bindOACs), len(wantTypes))
+			}
+			for i, descriptor := range oall.bindOACs {
+				oac := descriptor.(*tTIoac)
+				if got := DtyType(oac.dataType); got != wantTypes[i] {
+					t.Errorf("OAC %d wire type = %v, want %v", i, got, wantTypes[i])
+				}
+				if oac.maxLength != wantLengths[i] {
+					t.Errorf("OAC %d maxLength = %d, want %d", i, oac.maxLength, wantLengths[i])
+				}
+			}
+
+			rxd := messages[1].(*tTIrxd)
+			wantDeferred := []bool{tc.wantDefer, false, tc.wantDefer}
+			for i, value := range rxd.bindValues {
+				if value.postponed != wantDeferred[i] {
+					t.Errorf("bind %d postponed = %t, want %t", i, value.postponed, wantDeferred[i])
+				}
+			}
+		})
 	}
 }

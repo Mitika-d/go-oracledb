@@ -200,6 +200,8 @@ var testCases = []oracleTest.CategorizedTestCase{
 	{Name: "TestDriver_Prepared_Insert_Clob_Large", Categories: "functional", Exclusive: false, Fn: TestDriver_Prepared_Insert_Clob_Large},
 	{Name: "TestDriver_Prepared_Insert_Blob_Small", Categories: "functional", Exclusive: false, Fn: TestDriver_Prepared_Insert_Blob_Small},
 	{Name: "TestDriver_Prepared_Insert_Blob_Large", Categories: "functional", Exclusive: false, Fn: TestDriver_Prepared_Insert_Blob_Large},
+	{Name: "TestDriver_Insert_BlobBindOrdering", Categories: "functional", Exclusive: false, Fn: TestDriver_Insert_BlobBindOrdering},
+	{Name: "TestDriver_Insert_ClobBindOrdering", Categories: "functional", Exclusive: false, Fn: TestDriver_Insert_ClobBindOrdering},
 
 	{Name: "TestReadOnlyTransaction", Categories: "functional", Exclusive: false, Fn: TestReadOnlyTransaction},
 	{Name: "TestConnectionTransactionPoolIsolation", Categories: "functional", Exclusive: false, Fn: TestConnectionTransactionPoolIsolation},

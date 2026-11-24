@@ -170,6 +170,168 @@ func TestDriver_Prepared_Insert_Blob_Large(t *testing.T) {
 	runPreparedInsertBlob(t, createObjectName("blob1_large"), rows)
 }
 
+// TestDriver_Insert_BlobBindOrdering verifies a 1 MiB []byte BLOB bind stays
+// paired with its value before or after a short VARCHAR2 bind. It reverses the
+// named argument order and checks the inserted BLOB bytes in both cases.
+func TestDriver_Insert_BlobBindOrdering(t *testing.T) {
+	t.Parallel()
+	if TestingConfig == nil {
+		t.Skip("No configuration available")
+	}
+
+	ctx := context.Background()
+	db, err := openTestDBWithConfig(TestingConfig)
+	if err != nil {
+		t.Fatalf("failed to open test DB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	table := createObjectName("blob_bind_order")
+	if err := createTable(ctx, db, table, map[string]string{
+		"marker":  "VARCHAR2(40) PRIMARY KEY",
+		"payload": "BLOB",
+	}); err != nil {
+		t.Fatalf("failed to create BLOB bind-order table: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dropTable(ctx, db, table); err != nil {
+			t.Errorf("failed to drop BLOB bind-order table %s: %v", table, err)
+		}
+	})
+
+	payload := make([]byte, 1<<20)
+	for i := range payload {
+		payload[i] = byte(i*31 + 7)
+	}
+
+	for _, tc := range []struct {
+		name          string
+		columns       string
+		placeholders  string
+		argumentOrder []string
+		marker        string
+	}{
+		{
+			name:          "payload_before_marker",
+			columns:       "payload, marker",
+			placeholders:  ":payload, :marker",
+			argumentOrder: []string{"marker", "payload"},
+			marker:        "payload-first",
+		},
+		{
+			name:          "marker_before_payload",
+			columns:       "marker, payload",
+			placeholders:  ":marker, :payload",
+			argumentOrder: []string{"payload", "marker"},
+			marker:        "marker-first",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argsByName := map[string]any{
+				"payload": sql.Named("payload", payload),
+				"marker":  sql.Named("marker", tc.marker),
+			}
+			args := make([]any, 0, len(tc.argumentOrder))
+			for _, name := range tc.argumentOrder {
+				args = append(args, argsByName[name])
+			}
+
+			insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, tc.columns, tc.placeholders)
+			if _, err := db.ExecContext(ctx, insertSQL, args...); err != nil {
+				t.Fatalf("insert with %s order failed: %v", tc.name, err)
+			}
+
+			var got []byte
+			selectSQL := fmt.Sprintf("SELECT payload FROM %s WHERE marker = :marker", table)
+			if err := db.QueryRowContext(ctx, selectSQL, sql.Named("marker", tc.marker)).Scan(&got); err != nil {
+				t.Fatalf("select inserted BLOB for %s failed: %v", tc.name, err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("BLOB bytes differ for %s: got %d bytes, want %d", tc.name, len(got), len(payload))
+			}
+		})
+	}
+}
+
+// TestDriver_Insert_ClobBindOrdering verifies a 1 MiB CLOB string stays paired
+// with its named placeholder before or after a short VARCHAR2 bind. It checks
+// the inserted text in both placeholder orders.
+func TestDriver_Insert_ClobBindOrdering(t *testing.T) {
+	t.Parallel()
+	if TestingConfig == nil {
+		t.Skip("No configuration available")
+	}
+
+	ctx := context.Background()
+	db, err := openTestDBWithConfig(TestingConfig)
+	if err != nil {
+		t.Fatalf("failed to open test DB: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	table := createObjectName("clob_bind_order")
+	if err := createTable(ctx, db, table, map[string]string{
+		"marker":  "VARCHAR2(40) PRIMARY KEY",
+		"payload": "CLOB",
+	}); err != nil {
+		t.Fatalf("failed to create CLOB bind-order table: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := dropTable(ctx, db, table); err != nil {
+			t.Errorf("failed to drop CLOB bind-order table %s: %v", table, err)
+		}
+	})
+
+	payload := strings.Repeat("x", 1<<20)
+	for _, tc := range []struct {
+		name          string
+		columns       string
+		placeholders  string
+		argumentOrder []string
+		marker        string
+	}{
+		{
+			name:          "payload_before_marker",
+			columns:       "payload, marker",
+			placeholders:  ":payload, :marker",
+			argumentOrder: []string{"marker", "payload"},
+			marker:        "payload-first",
+		},
+		{
+			name:          "marker_before_payload",
+			columns:       "marker, payload",
+			placeholders:  ":marker, :payload",
+			argumentOrder: []string{"payload", "marker"},
+			marker:        "marker-first",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			argsByName := map[string]any{
+				"payload": sql.Named("payload", payload),
+				"marker":  sql.Named("marker", tc.marker),
+			}
+			args := make([]any, 0, len(tc.argumentOrder))
+			for _, name := range tc.argumentOrder {
+				args = append(args, argsByName[name])
+			}
+
+			insertSQL := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table, tc.columns, tc.placeholders)
+			if _, err := db.ExecContext(ctx, insertSQL, args...); err != nil {
+				t.Fatalf("insert with %s order failed: %v", tc.name, err)
+			}
+
+			var got string
+			selectSQL := fmt.Sprintf("SELECT payload FROM %s WHERE marker = :marker", table)
+			if err := db.QueryRowContext(ctx, selectSQL, sql.Named("marker", tc.marker)).Scan(&got); err != nil {
+				t.Fatalf("select inserted CLOB for %s failed: %v", tc.name, err)
+			}
+			if got != payload {
+				t.Fatalf("CLOB text differs for %s: got %d bytes, want %d", tc.name, len(got), len(payload))
+			}
+		})
+	}
+}
+
 func runPreparedInsertClob(t *testing.T, table string, rows []clobRowData) {
 	t.Helper()
 
