@@ -41,6 +41,8 @@ package ttc
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -130,6 +132,8 @@ type Statement struct {
 	queryStatementExecutor QueryWithContext
 	execStatementExecutor  ExecWithContext
 	_rows                  driver.Rows // reference on created Rows.
+	closed                 bool
+	sessionContext         *driverCommon.SessionContext
 }
 
 /*
@@ -178,6 +182,7 @@ func newStatement(
 	}
 	stmt := &Statement{
 		shelf:                  shelf,
+		sessionContext:         sessionCtx,
 		qualifiedQuery:         classifiedQ,
 		queryStatementExecutor: queryExecutor,
 		execStatementExecutor:  execExecutor,
@@ -194,14 +199,20 @@ driver.StmtQueryContext.
 
 Implementation details:
   - Validates args against the parsed bind placeholders (count and names).
+  - Converts caller-owned typed LOB locators to TTC bind values.
   - Creates a child context with a cancellation after-function that can attempt
     a server-side break/reset when ctx is canceled or times out.
   - Delegates execution to the queryStatementExecutor, which performs the TTC
     pipeline and returns a driver.Rows implementation.
+  - Discards the session after an ambiguous failure involving a LOB locator.
 
 Callers must fully consume and Close the returned Rows.
 */
 func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) (driver.Rows, error) {
+	preparedArgs, hasLOBLocator, err := prepareLOBLocatorBinds(s.shelf, s.sessionContext, args)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
 	subContext, cancelSubContext, cleanup := s.createSubContextWithCancelAfterfunction(ctx)
 	defer cleanup()
 
@@ -214,16 +225,67 @@ func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) 
 		})
 		defer stopTransAfterFunction()
 	}
-	selectedRows, e := s.queryStatementExecutor.QueryContext(subContext, s.qualifiedQuery, args)
-	if e == nil {
-		s._rows = selectedRows
+	selectedRows, executionErr := s.queryStatementExecutor.QueryContext(subContext, s.qualifiedQuery, preparedArgs)
+	executionErr = finishLOBLocatorBindExecution(s.shelf, hasLOBLocator, executionErr)
+	if executionErr != nil && selectedRows != nil {
+		_ = selectedRows.Close()
+		selectedRows = nil
+	}
+	if executionErr == nil {
+		// Attach the caller's Rows lifetime before cleanup cancels the exchange
+		// context, which is too short-lived for later locator reads.
+		switch rows := selectedRows.(type) {
+		case *ttcRows:
+			if rows == nil {
+				executionErr = common.NewOracleError(oracleErrors.InternalError, errors.New("query executor returned nil Rows"))
+				break
+			}
+			// Locator-backed values outlive this exchange, so derive their lifetime
+			// from the original query context.
+			rows.setContext(ctx)
+			rows.attachStatement(s)
+			s._rows = rows
+		case *ttcRowsRefCursor:
+			if rows == nil {
+				executionErr = common.NewOracleError(oracleErrors.InternalError, errors.New("query executor returned nil REF CURSOR Rows"))
+				break
+			}
+			// REF CURSOR wrapper queries return Rows already owned by the originating
+			// connection and do not attach to this wrapper Statement.
+			rows.ttcRows.setContext(ctx)
+		case *ttcRowsRefCursorImplicitFetch:
+			if rows == nil {
+				executionErr = common.NewOracleError(oracleErrors.InternalError, errors.New("query executor returned nil implicit result Rows"))
+				break
+			}
+			// Implicit results are owned and closed through their wrapper. Rebind its
+			// child cursor rows to the public query context before the exchange
+			// context is canceled, then attach the wrapper itself to the Statement.
+			rows.setContext(ctx)
+			rows.attachStatement(s)
+			s._rows = rows
+		case nil:
+			executionErr = common.NewOracleError(oracleErrors.InternalError, errors.New("query executor returned nil Rows"))
+		default:
+			_ = selectedRows.Close()
+			executionErr = common.NewOracleError(
+				oracleErrors.InternalError,
+				fmt.Errorf("query executor returned Rows type %T", selectedRows),
+			)
+		}
 	}
 
 	if err := s.shelf.checkCurrentState(ctx); err != nil {
+		if selectedRows != nil {
+			_ = selectedRows.Close()
+		}
 		return nil, err
 	}
 
-	return selectedRows, s.shelf.LocalizeError(e)
+	if executionErr != nil {
+		return nil, s.shelf.LocalizeError(executionErr)
+	}
+	return selectedRows, nil
 }
 
 // _closeCursor closes the statement cursorID if not 0
@@ -251,27 +313,61 @@ func (s *Statement) _closeCursor() error {
 	return nil
 }
 
-// Close implements driver.Stmt.Close.
+// Close implements driver.Stmt.Close. It closes attached Rows, queues cursor
+// cleanup when Rows cleanup succeeds, and unregisters the statement. Rows that
+// own this Statement call closeFromStatement to avoid recursive Close calls.
 func (s *Statement) Close() error {
-	var finalErr oracleErrors.SQLError
-
-	//  close the associated rows if any
-	if s._rows != nil {
-		err := s._rows.Close()
-		if err != nil {
-			common.Odl.Debug("Failed to close rows", "error", err)
-			finalErr = s.shelf.LocalizeError(common.NewOracleError(oracleErrors.RowsCloseFailed, err)).(oracleErrors.SQLError)
-		}
-		s._rows = nil
+	if s.closed {
+		return nil
 	}
-	// close cursors
-	err := s._closeCursor()
-	if err != nil {
-		common.Odl.Debug("Failed to close statement", "error", err)
-		finalErr = s.shelf.LocalizeError(common.NewOracleError(oracleErrors.StatementCloseFailed, err)).(oracleErrors.SQLError)
+	s.closed = true
+	rows := s._rows
+	s._rows = nil
+
+	var finalErr error
+
+	// Mark associated Rows closed without allowing it to recursively close this
+	// Statement. The cursor is closed below exactly once.
+	if rows != nil {
+		switch typedRows := rows.(type) {
+		case *ttcRows:
+			finalErr = typedRows.closeFromStatement(s)
+		case *ttcRowsRefCursorImplicitFetch:
+			finalErr = typedRows.closeFromStatement(s)
+		default:
+			finalErr = rows.Close()
+		}
+		if finalErr != nil {
+			common.Odl.Debug("Failed to close rows", "error", finalErr)
+			s.shelf.getEventService().post(streamerStaleEvent, nil)
+			finalErr = s.shelf.LocalizeError(common.NewOracleError(oracleErrors.RowsCloseFailed, finalErr))
+		}
+	}
+	// If Rows cleanup failed, its cursor-close requests may have left the TTC
+	// stream in an uncertain state. Connection teardown will release this cursor.
+	if finalErr == nil {
+		err := s._closeCursor()
+		if err != nil {
+			common.Odl.Debug("Failed to close statement", "error", err)
+			// The cursor-close exchange did not complete. Do not allow database/sql to
+			// reuse a session whose outgoing TTC state may be ambiguous.
+			s.shelf.getEventService().post(streamerStaleEvent, nil)
+			finalErr = s.shelf.LocalizeError(common.NewOracleError(oracleErrors.StatementCloseFailed, err))
+		}
 	}
 
 	return finalErr
+}
+
+// detachRows clears only the matching result, allowing a prepared Statement to
+// remain open and reusable after its Rows close.
+//
+// Parameters:
+//   - rows: result being detached.
+func (s *Statement) detachRows(rows driver.Rows) {
+	if s._rows == rows {
+		s._rows = nil
+	}
 }
 
 // NumInput implements driver.Stmt.NumInput. -1 indicates unknown/variadic.
@@ -293,14 +389,20 @@ driver.StmtExecContext.
 
 Implementation details:
   - Validates args against the parsed bind placeholders (count and names).
+  - Converts caller-owned typed LOB locators to TTC bind values.
   - Creates a child context with a cancellation after-function that can attempt
     a server-side break/reset when ctx is canceled or times out.
   - Delegates execution to the execStatementExecutor, which performs the TTC
     operations and returns a driver.Result.
+  - Discards the session after an ambiguous failure involving a LOB locator.
 
 The returned Result may expose rows-affected metadata when the server provides it.
 */
 func (s *Statement) ExecContext(ctx context.Context, args []driver.NamedValue) (driver.Result, error) {
+	preparedArgs, hasLOBLocator, err := prepareLOBLocatorBinds(s.shelf, s.sessionContext, args)
+	if err != nil {
+		return nil, s.shelf.LocalizeError(err)
+	}
 	subContext, cancelSubContext, cleanup := s.createSubContextWithCancelAfterfunction(ctx)
 	defer cleanup()
 
@@ -313,7 +415,9 @@ func (s *Statement) ExecContext(ctx context.Context, args []driver.NamedValue) (
 		})
 		defer stopTransAfterFunction()
 	}
-	result, err := s.execStatementExecutor.ExecContext(subContext, s.qualifiedQuery, args)
+
+	result, err := s.execStatementExecutor.ExecContext(subContext, s.qualifiedQuery, preparedArgs)
+	err = finishLOBLocatorBindExecution(s.shelf, hasLOBLocator, err)
 	if err := s.shelf.checkCurrentState(ctx); err != nil {
 		return nil, err
 	}

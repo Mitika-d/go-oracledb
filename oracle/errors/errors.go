@@ -327,6 +327,12 @@ const (
 	// LobValueInvalidated indicates the Rows, statement, transaction, or
 	// connection that owns a locator-backed LOB is no longer usable.
 	LobValueInvalidated ErrorCode = "OGD-00309"
+	// InvalidLobInput indicates LOB input data is malformed, such as invalid UTF-8.
+	InvalidLobInput ErrorCode = "OGD-00310"
+	// LobValueClosed indicates an operation was attempted after a streamed LOB value was closed.
+	LobValueClosed ErrorCode = "OGD-00311"
+	// InvalidLobSource indicates a value is not a valid driver-provided LOB source.
+	InvalidLobSource ErrorCode = "OGD-00312"
 )
 
 // OracleRefuseErrorCodes maps ORA error numbers to the driver error

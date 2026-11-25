@@ -40,6 +40,8 @@ package ttc
 
 import (
 	"context"
+	"database/sql/driver"
+	"reflect"
 	"unicode/utf8"
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
@@ -120,7 +122,7 @@ func (m *lobManager) createTemporary(ctx context.Context, kind internallob.Kind)
 	if err != nil {
 		return nil, err
 	}
-	return append(driverCommon.B1Array(nil), bytes...), nil
+	return bytes, nil
 }
 
 // read dispatches a bounded locator read and returns data with the Oracle
@@ -381,4 +383,38 @@ func validateTTCLobKindAndLocator(kind internallob.Kind, loc *locator) error {
 		return err
 	}
 	return validateTTCLobLocator(loc)
+}
+
+// bindLOBLocatorValue converts a caller-owned locator into TTC bind metadata.
+// The locator must belong to this physical session; the caller retains its
+// lifetime after statement execution.
+func (m *lobManager) bindLOBLocatorValue(value internallob.LOBLocatorBindValue) (driver.Value, error) {
+	if value.SessionKey == nil || !reflect.TypeOf(value.SessionKey).Comparable() ||
+		value.SessionKey != m.shelf || len(value.Locator) == 0 || !internallob.ValidKind(value.Kind) {
+		return nil, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB locator connection or metadata")
+	}
+	locator := append(driverCommon.B1Array(nil), value.Locator...)
+	switch value.Kind {
+	case internallob.BLOB:
+		return blobLocatorBind{locator: locator}, nil
+	case internallob.CLOB:
+		if len(locator) <= koll3FlagOffset {
+			return nil, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "CLOB locator")
+		}
+		// CLOB locators use the varying-width flag expected by the server.
+		locator[koll3FlagOffset] |= kolblVaryingWidthFlag
+		return clobLocatorBind{
+			locator:     locator,
+			charsetForm: driverCommon.UB1(FormChar),
+			charsetID:   m.sessionCtx.DriverCharacterSet(),
+		}, nil
+	case internallob.NCLOB:
+		return clobLocatorBind{
+			locator:     locator,
+			charsetForm: driverCommon.UB1(FormNChar),
+			charsetID:   m.sessionCtx.SessionNCharCharacterSet(),
+		}, nil
+	default:
+		return nil, common.NewOracleError(oracleErrors.InvalidLobSource, nil, "LOB locator kind")
+	}
 }

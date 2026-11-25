@@ -53,6 +53,7 @@ import (
 
 	"github.com/oracle/go-oracledb/v26/internal/common"
 	driverCommon "github.com/oracle/go-oracledb/v26/internal/driver/common"
+	internallob "github.com/oracle/go-oracledb/v26/internal/lob"
 	"github.com/oracle/go-oracledb/v26/oracle/datatype"
 	oracleErrors "github.com/oracle/go-oracledb/v26/oracle/errors"
 )
@@ -191,6 +192,28 @@ func (c *connection) QueryContext(ctx context.Context, query string, args []driv
 	if err != nil {
 		_ = stmt.Close()
 		return nil, c.shelf.LocalizeError(err)
+	}
+	// Direct-query Rows own their temporary Statement until Rows.Close so the
+	// cursor and locator-backed values share one lifetime.
+	switch rows := result.(type) {
+	case *ttcRows:
+		if !rows.takeStatementOwnership(stmt) {
+			_ = stmt.Close()
+			return nil, c.shelf.LocalizeError(common.NewOracleError(
+				oracleErrors.StatementExecutionFailed,
+				errors.New("query Rows closed before Statement ownership transfer"),
+				"query",
+			))
+		}
+	case *ttcRowsRefCursorImplicitFetch:
+		if !rows.takeStatementOwnership(stmt) {
+			_ = stmt.Close()
+			return nil, c.shelf.LocalizeError(common.NewOracleError(
+				oracleErrors.StatementExecutionFailed,
+				errors.New("implicit Rows closed before Statement ownership transfer"),
+				"query",
+			))
+		}
 	}
 	return result, nil
 }
@@ -372,15 +395,21 @@ func (c *connection) markInvalid() {
 	discardLobSessionState(c.shelf)
 }
 
-// CheckNamedValue allows sql.Out binds to pass through database/sql conversion.
-// For all other values, we delegate back to database/sql default conversion.
+// CheckNamedValue snapshots typed LOB locators before database/sql default
+// value conversion.
 func (c *connection) CheckNamedValue(nv *driver.NamedValue) error {
 	return c.shelf.LocalizeError(checkNamedValue(nv))
 }
 
-// checkNamedValue validates sql.Out destinations and returns shelf-localized
-// Oracle errors for binding problems.
+// checkNamedValue preserves driver-specific bind values and validates sql.Out
+// destinations before database/sql passes them to the statement.
 func checkNamedValue(nv *driver.NamedValue) error {
+	// Let typed LOB values pass through database/sql unchanged. Statement
+	// binding resolves providers and validates the owning session before encoding.
+	switch nv.Value.(type) {
+	case internallob.LOBLocatorBindValue, internallob.LOBLocatorBindValueProvider:
+		return nil
+	}
 	// connectionWrapper.Fetch passes an already-decoded driver.Rows to the internal
 	// REF CURSOR statement executor. This is not a REF CURSOR OUT-bind destination.
 	if _, ok := nv.Value.(driver.Rows); ok {

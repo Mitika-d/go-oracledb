@@ -216,6 +216,21 @@ func newTTIOacBytes(maxLength driverCommon.UB4) driverCommon.Marshallable {
 	return newTTIoac(DtyVbi, maxLength)
 }
 
+// newTTIOacBlobBind creates an OAC descriptor for BLOB locator binds.
+func newTTIOacBlobBind() driverCommon.Marshallable {
+	oac := newTTIoac(DtyBlob, max_lob_length)
+	// BLOBs are binary and do not carry character-set metadata.
+	oac.characterSetID = 0
+	oac.characterSetForm = 0
+	return oac
+}
+
+// newTTIOacClobBind creates an OAC descriptor for CLOB and NCLOB locator binds.
+// The bind value supplies the database or national charset metadata.
+func newTTIOacClobBind() driverCommon.Marshallable {
+	return newTTIoac(DtyClob, max_lob_length)
+}
+
 // newTTIOacNull creates an OAC descriptor for null bind values using the driver's null placeholder length.
 func newTTIOacNull() driverCommon.Marshallable {
 	return newTTIoac(DtyVCS, converters.MaxNullLength)

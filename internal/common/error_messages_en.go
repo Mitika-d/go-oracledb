@@ -481,12 +481,27 @@ func initMessagesEn() {
 	// Action:   Use an operation supported by the selected LOB family.
 	// Comment:  Arg[0]: compact operation and LOB-family detail.
 	message.SetString(language.English, string(oracleErrors.UnsupportedLobOperation), "LOB operation is not supported: %s")
-	// Locator-backed LOB lifecycle and input errors.
+	// Locator-backed LOB lifecycle and bind errors.
 	// Document: No
 	// Cause:    The Rows, statement, transaction, or connection owning the LOB locator is no longer usable.
 	// Action:   Re-run the query and scan a new LOB value.
 	// Comment:  Arg[0]: invalidation detail.
 	message.SetString(language.English, string(oracleErrors.LobValueInvalidated), "LOB value is invalid because its owner is no longer usable: %s")
+	// Document: No
+	// Cause:    An operation was attempted after the streamed LOB value was closed.
+	// Action:   Scan a new value before reuse, or do not perform operations after Close.
+	// Comment:  Arg[0]: operation-specific detail.
+	message.SetString(language.English, string(oracleErrors.LobValueClosed), "LOB value is closed and cannot be used: %s")
+	// Document: No
+	// Cause:    A locator-backed LOB source is invalid or cannot be used by the requested operation.
+	// Action:   Use a valid locator-backed LOB value from the driver and verify its LOB kind and metadata.
+	// Comment:  Arg[0]: source validation detail.
+	message.SetString(language.English, string(oracleErrors.InvalidLobSource), "invalid locator-backed LOB source: %s")
+	// Document: No
+	// Cause:    LOB input data is malformed, for example text contains invalid UTF-8.
+	// Action:   Supply valid data for the target LOB kind.
+	// Comment:  Arg[0]: input validation detail.
+	message.SetString(language.English, string(oracleErrors.InvalidLobInput), "LOB input is invalid: %s")
 
 	// Document: No
 	message.SetString(language.English, string(oracleErrors.CancelOperationError), "cancel operation failed")

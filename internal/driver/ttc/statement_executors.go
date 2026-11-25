@@ -190,6 +190,7 @@ func (e *statementExecutorSelect) newQueryRunState() *queryRunState {
 	}
 	rows := newTTCRows(e.resultMetadata.columns)
 	rows.SetShelf(e.shelf)
+	rows.setSessionContext(e.sessCtx)
 	return &queryRunState{rows: rows}
 }
 
@@ -549,6 +550,9 @@ func (e *statementProcessor) createMessages(query *qualifiedSQLStatement, args [
 		if err != nil {
 			return nil, err
 		}
+		if err := applyLOBLocatorBindOACMetadata(oacs, args); err != nil {
+			return nil, err
+		}
 	}
 	sendOACs := e.needToSendOACs(oacs)
 	functionType := config.functionType
@@ -852,8 +856,11 @@ func (e *statementProcessor) needToSendOACs(currentOacs []driverCommon.Marshalla
 		return true
 	}
 	for position := 0; position < len(currentOacs); position++ {
-		if e.previousOacs[position].(*tTIoac).dataType != currentOacs[position].(*tTIoac).dataType ||
-			e.previousOacs[position].(*tTIoac).maxLength < currentOacs[position].(*tTIoac).maxLength {
+		previous := e.previousOacs[position].(*tTIoac)
+		current := currentOacs[position].(*tTIoac)
+		if previous.dataType != current.dataType || previous.maxLength < current.maxLength ||
+			(current.dataType == driverCommon.UB1(DtyClob) &&
+				(previous.characterSetForm != current.characterSetForm || previous.characterSetID != current.characterSetID)) {
 			return true
 		}
 	}
@@ -1241,6 +1248,7 @@ func (e *statementExecutorSelect) handleDCB(state *queryRunState, msg driverComm
 	rows := newTTCRows(columns)
 	rows.SetShelf(e.shelf)
 	state.rows = rows
+	state.rows.setSessionContext(e.sessCtx)
 	return nil
 }
 
