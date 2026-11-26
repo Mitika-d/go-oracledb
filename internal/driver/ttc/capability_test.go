@@ -208,6 +208,27 @@ func TestCapabilityUnmarshalFrom_Success(t *testing.T) {
 	}
 }
 
+// TestCapabilityUnmarshalFrom_EmptyRuntimeCapabilities clears assumed server
+// runtime capabilities when the server explicitly reports an empty array.
+func TestCapabilityUnmarshalFrom_EmptyRuntimeCapabilities(t *testing.T) {
+	t.Parallel()
+	payload := makeTestPayload(testCompileCaps(), []byte{})
+	buf := NewArrayDataBuffer(1024)
+	buf.WriteBytesWithContext(context.Background(), payload)
+
+	cap := newCapability()
+	engine := NewNativeMarshalEngine(buf, common.BIG_ENDIAN)
+	if err := cap.UnmarshalFrom(context.Background(), engine); err != nil {
+		t.Fatalf("UnmarshalFrom returned error: %v", err)
+	}
+	if len(cap.runTimeCapabilities) != 0 {
+		t.Fatalf("runtime capabilities = %v, want empty", cap.runTimeCapabilities)
+	}
+	if got := cap.toMap()[kpccapRtbTtc32k]; got.IsSet {
+		t.Fatalf("32K VARCHAR capability = %+v, want unset", got)
+	}
+}
+
 // TestCapabilityUnmarshalFrom_Fail checks error unmarshal.
 func TestCapabilityUnmarshalFrom_Fail(t *testing.T) {
 	t.Parallel()

@@ -87,6 +87,43 @@ type tTIrxd struct {
 type encodedBindValue struct {
 	payload  driverCommon.B1Array
 	metadata bindValueMetadata
+	// postponed marks oversized ordinary character/binary binds for the second RXD pass.
+	postponed bool
+}
+
+// Standard and extended VARCHAR byte limits used for RXD bind ordering.
+const (
+	maxStandardNonStreamBindByteSize driverCommon.UB4 = 4_000
+	maxExtendedNonStreamBindByteSize driverCommon.UB4 = 32_767
+)
+
+// nonStreamBindByteSize returns the 32K threshold when the server advertises it,
+// otherwise the standard 4K threshold.
+func nonStreamBindByteSize(capabilities map[string]driverCommon.Capability) driverCommon.UB4 {
+	if capability, ok := capabilities[kpccapRtbTtc32k]; ok && capability.IsSet {
+		return maxExtendedNonStreamBindByteSize
+	}
+	return maxStandardNonStreamBindByteSize
+}
+
+// shouldPostponeBind defers oversized SQL character/binary OACs by their byte
+// length. PL/SQL, pure OUT, LONG-family, and other wire types (including
+// VECTOR) keep their existing ordering rules.
+func shouldPostponeBind(metadata bindValueMetadata, oac driverCommon.Marshallable, isPLSQL bool, maxBindByteSize driverCommon.UB4) bool {
+	if isPLSQL || metadata.isOutOnly || isLongBindType(metadata.goType) {
+		return false
+	}
+	descriptor, ok := oac.(*tTIoac)
+	if !ok || descriptor.maxLength <= maxBindByteSize {
+		return false
+	}
+	switch DtyType(descriptor.dataType) {
+	case DtyChr, DtyBin:
+		return true
+	default:
+		// Special wire types, including VECTOR, keep their own ordering rules.
+		return false
+	}
 }
 
 // newTTIrxd instantiates a TTIrxd struct configured to decode plain RXD resultset messages from Oracle's TTC protocol.
@@ -165,13 +202,14 @@ func (rxd *tTIrxd) setBindValues(values []encodedBindValue) {
 
 // orderedBindIndices returns the stable wire order for bind payloads. OACs and
 // the source bind slice remain in placeholder order; TTC RXD sends ordinary
-// values first, followed by LONG/LONG RAW values. The returned
-// indices keep each payload paired with its original metadata and wrapper.
+// values first, followed by postponed character/binary and LONG/LONG RAW values.
+// The returned indices keep each payload paired with its original metadata and wrapper.
 func orderedBindIndices(values []encodedBindValue) []int {
 	indices := make([]int, 0, len(values))
-	for _, longPass := range []bool{false, true} {
-		for i := range values {
-			if isLongBindType(values[i].metadata.goType) != longPass {
+	for _, postponedPass := range []bool{false, true} {
+		for i, value := range values {
+			postponed := value.postponed || isLongBindType(value.metadata.goType)
+			if postponed != postponedPass {
 				continue
 			}
 			indices = append(indices, i)
@@ -183,9 +221,10 @@ func orderedBindIndices(values []encodedBindValue) []int {
 /*
 MarshalTo writes the RXD bind payload for outgoing messages (single row).
 It resolves each encoder from the message's protocol-matched codec factory and
-uses that encoder's transport wrapper for the corresponding payload. LONG
-payloads are deferred until after ordinary values while preserving placeholder
-order within each group; the OAC descriptors remain in placeholder order.
+uses that encoder's transport wrapper for the corresponding payload. Large
+character, binary, and LONG payloads are deferred until after ordinary values
+while preserving placeholder order within each group; OAC descriptors remain
+in placeholder order.
 */
 func (rxd *tTIrxd) MarshalTo(ctx context.Context, engine driverCommon.Marshaller) error {
 	for _, index := range orderedBindIndices(rxd.bindValues) {

@@ -539,6 +539,9 @@ func (e *statementProcessor) createMessages(query *qualifiedSQLStatement, args [
 		rows     [][]driverCommon.B1Array
 		oacs     []driverCommon.Marshallable
 	)
+	isPLSQL := query != nil && query.kind == plsql
+	// The negotiated threshold is shared by every bind in this message batch.
+	maxBindByteSize := nonStreamBindByteSize(e.shelf.GetCapabilities())
 	if len(args) > 0 {
 		var err error
 		metadata = extractBindMetadata(args)
@@ -546,7 +549,6 @@ func (e *statementProcessor) createMessages(query *qualifiedSQLStatement, args [
 		if err != nil {
 			return nil, err
 		}
-		isPLSQL := query != nil && query.kind == plsql
 		oacs, err = e.prepareOACs(rows, metadata, isPLSQL)
 		if err != nil {
 			return nil, err
@@ -578,7 +580,22 @@ func (e *statementProcessor) createMessages(query *qualifiedSQLStatement, args [
 		}
 		bindValues := make([]encodedBindValue, len(row))
 		for i, payload := range row {
-			bindValues[i] = encodedBindValue{payload: payload, metadata: metadata[i]}
+			postponed := shouldPostponeBind(metadata[i], oacs[i], isPLSQL, maxBindByteSize)
+			if postponed {
+				if oac, ok := oacs[i].(*tTIoac); ok {
+					common.Odl.Debug("Deferring oversized bind in TTC RXD",
+						"position", i+1,
+						"requestedType", oac.requestedtype,
+						"wireType", oac.dataType,
+						"oacMaxLength", oac.maxLength,
+						"threshold", maxBindByteSize)
+				}
+			}
+			bindValues[i] = encodedBindValue{
+				payload:   payload,
+				metadata:  metadata[i],
+				postponed: postponed,
+			}
 		}
 		bindMessage.(*tTIrxd).setBindValues(bindValues)
 		messages = append(messages, bindMessage)
@@ -788,8 +805,9 @@ func (e *statementProcessor) encodeBindValues(args []sqldriver.Value, metadata [
 	return rows, nil
 }
 
-// prepareOACs creates one bind OAC per normalized position. Variable-width
-// types use their payload size and retain the prior OAC width.
+// prepareOACs creates one bind OAC per normalized position. LONG-family OACs
+// use the SQL or PL/SQL maximum; other variable-width types use payload size
+// while retaining the prior OAC width.
 func (e *statementProcessor) prepareOACs(rows [][]driverCommon.B1Array, metadata []bindValueMetadata, isPLSQL bool) ([]driverCommon.Marshallable, error) {
 	oacs := make([]driverCommon.Marshallable, len(metadata))
 	for col, normalized := range metadata {

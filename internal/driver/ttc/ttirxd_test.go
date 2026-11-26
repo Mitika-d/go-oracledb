@@ -729,16 +729,15 @@ func testColumnRow(row []common.B1Array) []columnPayload {
 	return result
 }
 
-// TestTTIrxd_LongBindOrderingAndEncoderPairing verifies the explicit LONG-family
-// ordering rule: datatype.Long or datatype.LongRaw binds follow ordinary binds
-// while retaining encoder/payload pairing and OUT metadata. Each fixture
-// contains one LONG-family type. Large ordinary values deliberately remain in
-// the ordinary group; size-based postponement is outside this test's scope.
+// TestTTIrxd_LongBindOrderingAndEncoderPairing verifies that LONG-family and
+// oversized character/binary binds are deferred in stable order without losing
+// their encoder/payload pairing or OUT metadata. Each fixture contains one
+// LONG-family type and large ordinary character and binary values.
 //
 // Test cases:
-//   - LONG: ordinary strings/bytes, NULL, and 40 KiB values stay first; LONG
-//     binds follow in their original relative order and use the LONG encoder.
-//   - LONG RAW: the same checks for LONG RAW binds, including its matching encoder.
+//   - LONG: ordinary binds stay first; LONG, character, and binary payloads
+//     retain their source order and use the matching encoders.
+//   - LONG RAW: the same checks for LONG RAW and its matching encoder.
 func TestTTIrxd_LongBindOrderingAndEncoderPairing(t *testing.T) {
 	t.Parallel()
 
@@ -769,8 +768,8 @@ func TestTTIrxd_LongBindOrderingAndEncoderPairing(t *testing.T) {
 			encoderTag: 0x04,
 		},
 	} {
-		// Check stable ordering with ordinary string/byte binds, SQL NULL,
-		// 40 KiB values, an empty typed value, and a pure OUT bind of this type.
+		// Check stable ordering with ordinary values, SQL NULL, 40 KiB character
+		// and binary values, an empty typed value, and a pure OUT bind.
 		longOut := extractBindValueMetadata(sql.Out{Dest: tc.outDest, In: false})
 		values := []encodedBindValue{
 			{payload: common.B1Array{0xA0}, metadata: extractBindValueMetadata(tc.value)},
@@ -780,10 +779,10 @@ func TestTTIrxd_LongBindOrderingAndEncoderPairing(t *testing.T) {
 			{payload: nil, metadata: extractBindValueMetadata(tc.emptyValue)},
 			{payload: nil, metadata: longOut},
 			{payload: nil, metadata: extractBindValueMetadata(nil)},
-			{payload: make(common.B1Array, 40_000), metadata: extractBindValueMetadata(strings.Repeat("x", 40_000))},
-			{payload: make(common.B1Array, 40_000), metadata: extractBindValueMetadata(make([]byte, 40_000))},
+			{payload: make(common.B1Array, 40_000), metadata: extractBindValueMetadata(strings.Repeat("x", 40_000)), postponed: true},
+			{payload: make(common.B1Array, 40_000), metadata: extractBindValueMetadata(make([]byte, 40_000)), postponed: true},
 		}
-		wantIndices := []int{1, 3, 6, 7, 8, 0, 2, 4, 5}
+		wantIndices := []int{1, 3, 6, 0, 2, 4, 5, 7, 8}
 		if got := orderedBindIndices(values); !reflect.DeepEqual(got, wantIndices) {
 			t.Fatalf("%s ordered bind indices = %v, want %v", tc.name, got, wantIndices)
 		}
@@ -806,6 +805,8 @@ func TestTTIrxd_LongBindOrderingAndEncoderPairing(t *testing.T) {
 			{payload: common.B1Array{0xB1}, metadata: bindValueMetadata{goType: stringType}},
 			{payload: common.B1Array{0xC1}, metadata: bindValueMetadata{goType: tc.goType}},
 			{payload: common.B1Array{0xD1}, metadata: bindValueMetadata{goType: bytesType}},
+			{payload: common.B1Array{0xE1}, metadata: bindValueMetadata{goType: stringType}, postponed: true},
+			{payload: common.B1Array{0xF1}, metadata: bindValueMetadata{goType: bytesType}, postponed: true},
 		}
 		rxd.setBindValues(marshalValues)
 
@@ -818,6 +819,8 @@ func TestTTIrxd_LongBindOrderingAndEncoderPairing(t *testing.T) {
 			0x02, 0xD1,
 			tc.encoderTag, 0xA1,
 			tc.encoderTag, 0xC1,
+			0x01, 0xE1,
+			0x02, 0xF1,
 		}
 		if got := buf.bytes[:buf.currentWritePosition]; !reflect.DeepEqual(got, wantBytes) {
 			t.Fatalf("%s marshalled bind order/pairing = %v, want %v", tc.name, got, wantBytes)
@@ -825,5 +828,94 @@ func TestTTIrxd_LongBindOrderingAndEncoderPairing(t *testing.T) {
 		if !reflect.DeepEqual(rxd.bindValues, marshalValues) {
 			t.Fatalf("%s MarshalTo mutated the source bind values", tc.name)
 		}
+	}
+}
+
+// TestNonStreamBindByteSize verifies the RXD threshold follows the server's
+// negotiated 32K VARCHAR capability, using the standard limit when absent.
+//
+// Test cases:
+//   - Missing or disabled capability selects the 4,000-byte threshold.
+//   - Enabled capability selects the 32,767-byte threshold.
+func TestNonStreamBindByteSize(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		capabilities map[string]common.Capability
+		want         common.UB4
+	}{
+		{
+			name: "capability_missing",
+			want: maxStandardNonStreamBindByteSize,
+		},
+		{
+			name: "capability_disabled",
+			capabilities: map[string]common.Capability{
+				kpccapRtbTtc32k: {},
+			},
+			want: maxStandardNonStreamBindByteSize,
+		},
+		{
+			name: "capability_enabled",
+			capabilities: map[string]common.Capability{
+				kpccapRtbTtc32k: {Value: 0x04, IsSet: true},
+			},
+			want: maxExtendedNonStreamBindByteSize,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := nonStreamBindByteSize(tc.capabilities); got != tc.want {
+				t.Fatalf("nonStreamBindByteSize() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShouldPostponeBind verifies OAC byte length, wire type, PL/SQL status,
+// and OUT direction determine whether an ordinary bind is deferred.
+//
+// Test cases:
+//   - Character and binary OACs defer only when maxLength exceeds the active threshold.
+//   - VECTOR, LONG RAW, pure OUT, and PL/SQL binds stay out of the size-based pass.
+//   - A multibyte Go string is classified using its encoded OAC byte length.
+func TestShouldPostponeBind(t *testing.T) {
+	t.Parallel()
+	standardLimit := maxStandardNonStreamBindByteSize
+	extendedLimit := maxExtendedNonStreamBindByteSize
+	multibyte := strings.Repeat("🙂", 1_001)
+	multibyteLength := common.UB4(len([]byte(multibyte)))
+	for _, tc := range []struct {
+		name     string
+		metadata bindValueMetadata
+		oac      common.Marshallable
+		isPLSQL  bool
+		limit    common.UB4
+		want     bool
+	}{
+		{name: "binary_below_standard", metadata: extractBindValueMetadata([]byte{1}), oac: newTTIoac(DtyBin, standardLimit-1), limit: standardLimit},
+		{name: "binary_at_standard", metadata: extractBindValueMetadata([]byte{1}), oac: newTTIoac(DtyBin, standardLimit), limit: standardLimit},
+		{name: "binary_above_standard", metadata: extractBindValueMetadata([]byte{1}), oac: newTTIoac(DtyBin, standardLimit+1), limit: standardLimit, want: true},
+		{name: "character_below_standard", metadata: extractBindValueMetadata("text"), oac: newTTIoac(DtyVCS, standardLimit-1), limit: standardLimit},
+		{name: "character_at_standard", metadata: extractBindValueMetadata("text"), oac: newTTIoac(DtyVCS, standardLimit), limit: standardLimit},
+		{name: "character_above_standard", metadata: extractBindValueMetadata("text"), oac: newTTIoac(DtyVCS, standardLimit+1), limit: standardLimit, want: true},
+		{name: "character_below_extended", metadata: extractBindValueMetadata("text"), oac: newTTIoac(DtyVCS, extendedLimit-1), limit: extendedLimit},
+		{name: "character_at_extended", metadata: extractBindValueMetadata("text"), oac: newTTIoac(DtyVCS, extendedLimit), limit: extendedLimit},
+		{name: "character_above_extended", metadata: extractBindValueMetadata("text"), oac: newTTIoac(DtyVCS, extendedLimit+1), limit: extendedLimit, want: true},
+		{name: "binary_below_extended", metadata: extractBindValueMetadata([]byte{1}), oac: newTTIoac(DtyBin, extendedLimit-1), limit: extendedLimit},
+		{name: "binary_at_extended", metadata: extractBindValueMetadata([]byte{1}), oac: newTTIoac(DtyBin, extendedLimit), limit: extendedLimit},
+		{name: "binary_above_extended", metadata: extractBindValueMetadata([]byte{1}), oac: newTTIoac(DtyBin, extendedLimit+1), limit: extendedLimit, want: true},
+		{name: "vector_above_standard", metadata: extractBindValueMetadata([]byte{1}), oac: newTTIoac(DtyVec, standardLimit+1), limit: standardLimit},
+		{name: "long_raw_above_standard", metadata: extractBindValueMetadata(datatype.LongRaw{1}), oac: newTTIoac(DtyLbi, standardLimit+1), limit: standardLimit},
+		{name: "out_only_character", metadata: extractBindValueMetadata(sql.Out{Dest: new(string), In: false}), oac: newTTIoac(DtyVCS, standardLimit+1), limit: standardLimit},
+		{name: "plsql_character", metadata: extractBindValueMetadata("text"), oac: newTTIoac(DtyVCS, standardLimit+1), isPLSQL: true, limit: standardLimit},
+		{name: "multibyte_string_uses_oac_bytes", metadata: extractBindValueMetadata(multibyte), oac: newTTIoac(DtyVCS, multibyteLength), limit: standardLimit, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldPostponeBind(tc.metadata, tc.oac, tc.isPLSQL, tc.limit); got != tc.want {
+				t.Fatalf("shouldPostponeBind() = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }

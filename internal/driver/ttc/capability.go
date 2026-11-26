@@ -387,16 +387,15 @@ func (cap *capability) UnmarshalFrom(ctx context.Context, mar driverCommon.Marsh
 		common.Odl.Warn("Failed to unmarshal runtime capabilities", "error", err)
 		return common.NewOracleError(oracleErrors.FailUnmarshal, err, "Capability")
 	}
-	if length > 0 {
-		cap.runTimeCapabilities = make([]byte, length)
-		for i := range cap.runTimeCapabilities {
-			val, err := mar.UnmarshalUB1(ctx)
-			if err != nil {
-				common.Odl.Warn("Failed to unmarshal runtime capabilities", "error", err)
-				return common.NewOracleError(oracleErrors.FailUnmarshal, err, "Capability")
-			}
-			cap.runTimeCapabilities[i] = byte(val)
+	// Replace assumed capabilities even when the server reports none.
+	cap.runTimeCapabilities = make([]byte, length)
+	for i := range cap.runTimeCapabilities {
+		val, err := mar.UnmarshalUB1(ctx)
+		if err != nil {
+			common.Odl.Warn("Failed to unmarshal runtime capabilities", "error", err)
+			return common.NewOracleError(oracleErrors.FailUnmarshal, err, "Capability")
 		}
+		cap.runTimeCapabilities[i] = byte(val)
 	}
 	return nil
 }
